@@ -9,17 +9,56 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 
 const RADIO_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
+pub const APP_NAME: &str = "bitchat-linux";
+
+fn app_directory_with(
+    get: &impl Fn(&str) -> Option<std::ffi::OsString>,
+    xdg_var: &str,
+    fallback: &str,
+) -> Result<PathBuf> {
+    let base = if let Some(path) = get(xdg_var)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+    {
+        path
+    } else {
+        PathBuf::from(get("HOME").context("HOME is not set")?).join(fallback)
+    };
+    Ok(base.join(APP_NAME))
+}
+
+pub fn app_data_dir() -> Result<PathBuf> {
+    app_directory_with(
+        &|name| std::env::var_os(name),
+        "XDG_DATA_HOME",
+        ".local/share",
+    )
+}
+
+pub fn app_state_dir() -> Result<PathBuf> {
+    app_directory_with(
+        &|name| std::env::var_os(name),
+        "XDG_STATE_HOME",
+        ".local/state",
+    )
+}
 
 pub use mesh::{ChatMessage, Me, PeerView, clean_message, sanitize_nickname};
 pub use node::{MAX_TEXT_BYTES, RadioState, RadioStatus};
 pub use power::Effective;
 pub use store::{Mode, Settings};
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SendOutcome {
+    /// The message was accepted in memory and queued for radio, but history storage failed.
+    pub history_error: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
@@ -66,7 +105,7 @@ impl MeshService {
         self.node.events()
     }
 
-    pub fn send_text(&self, text: &str) -> Result<(), String> {
+    pub fn send_text(&self, text: &str) -> Result<SendOutcome, String> {
         self.node.send_text(text)
     }
 
@@ -147,7 +186,7 @@ mod tests {
         let service = MeshService::start_with(store).unwrap();
         let mut changes = service.changes();
         service.set_nickname("linux").unwrap();
-        service.send_text("hello 🦀").unwrap();
+        assert_eq!(service.send_text("hello 🦀").unwrap().history_error, None);
         let snapshot = service.snapshot();
         assert_eq!(snapshot.me.nickname, "linux");
         assert_eq!(snapshot.messages.len(), 1);
@@ -158,6 +197,77 @@ mod tests {
         service.clear_history().unwrap();
         assert!(service.snapshot().messages.is_empty());
         service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn history_write_failure_warns_without_rejecting_the_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        let store = store::Store::at(temp.path().join("data"), state_dir.clone());
+        store
+            .save_settings(&Settings {
+                mode: Mode::Off,
+                persist_history: true,
+            })
+            .unwrap();
+        std::fs::create_dir(state_dir.join("messages.jsonl")).unwrap();
+        let service = MeshService::start_with(store).unwrap();
+        let outcome = service.send_text("not persisted").unwrap();
+        assert!(
+            outcome
+                .history_error
+                .as_deref()
+                .unwrap()
+                .contains("saving history")
+        );
+        assert_eq!(service.snapshot().messages[0].text, "not persisted");
+        service.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn disabled_history_does_not_report_a_storage_failure() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = store::Store::at(temp.path().join("data"), temp.path().join("state"));
+        store
+            .save_settings(&Settings {
+                mode: Mode::Off,
+                persist_history: false,
+            })
+            .unwrap();
+        let service = MeshService::start_with(store).unwrap();
+        assert_eq!(
+            service.send_text("memory only").unwrap().history_error,
+            None
+        );
+        assert_eq!(service.snapshot().messages[0].text, "memory only");
+        service.shutdown().await;
+    }
+
+    #[test]
+    fn app_paths_use_absolute_xdg_without_home_and_ignore_relative_xdg() {
+        use std::ffi::OsString;
+        let get = |name: &str| -> Option<OsString> {
+            match name {
+                "XDG_STATE_HOME" => Some("/xdg/state".into()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            app_directory_with(&get, "XDG_STATE_HOME", ".local/state",).unwrap(),
+            PathBuf::from("/xdg/state/bitchat-linux")
+        );
+        assert!(app_directory_with(&get, "XDG_DATA_HOME", ".local/share").is_err());
+        let get = |name: &str| -> Option<OsString> {
+            match name {
+                "HOME" => Some("/home/test".into()),
+                "XDG_DATA_HOME" => Some("relative".into()),
+                _ => None,
+            }
+        };
+        assert_eq!(
+            app_directory_with(&get, "XDG_DATA_HOME", ".local/share",).unwrap(),
+            PathBuf::from("/home/test/.local/share/bitchat-linux")
+        );
     }
 
     #[tokio::test]

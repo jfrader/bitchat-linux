@@ -68,29 +68,18 @@ pub struct Store {
 }
 
 impl Store {
-    /// `BITCHAT_DATA_DIR` / `BITCHAT_STATE_DIR` (set by the systemd unit, so
-    /// they always match its sandbox), else the XDG directories.
+    /// Absolute `BITCHAT_DATA_DIR` / `BITCHAT_STATE_DIR`, else the XDG directories.
     pub fn from_env() -> Result<Store> {
-        let explicit = |var: &str| {
-            std::env::var_os(var)
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-        };
-        let home = std::env::var_os("HOME")
+        let directory = |var: &str, default: fn() -> Result<PathBuf>| match std::env::var_os(var)
             .map(PathBuf::from)
-            .context("HOME is not set")?;
-        let xdg = |var: &str, fallback: &str| {
-            std::env::var_os(var)
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-                .unwrap_or_else(|| home.join(fallback))
+            .filter(|path| path.is_absolute())
+        {
+            Some(path) => Ok(path),
+            None => default().map(|path| path.join("mesh")),
         };
         Ok(Store::at(
-            explicit("BITCHAT_DATA_DIR")
-                .unwrap_or_else(|| xdg("XDG_DATA_HOME", ".local/share").join("bitchat-linux/mesh")),
-            explicit("BITCHAT_STATE_DIR").unwrap_or_else(|| {
-                xdg("XDG_STATE_HOME", ".local/state").join("bitchat-linux/mesh")
-            }),
+            directory("BITCHAT_DATA_DIR", crate::app_data_dir)?,
+            directory("BITCHAT_STATE_DIR", crate::app_state_dir)?,
         ))
     }
 

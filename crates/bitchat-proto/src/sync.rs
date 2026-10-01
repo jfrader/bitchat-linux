@@ -74,7 +74,13 @@ impl RequestSync {
             }
         }
         let (p, m, data) = (p?, m?, data?);
-        (p >= 1 && m > 0).then_some(RequestSync { p, m, data, types, since })
+        (p >= 1 && m > 0).then_some(RequestSync {
+            p,
+            m,
+            data,
+            types,
+            since,
+        })
     }
 
     /// Does the requester want packets of this kind?
@@ -84,7 +90,10 @@ impl RequestSync {
 
     /// Decode the filter for membership tests.
     pub fn filter(&self) -> Gcs {
-        Gcs { m: self.m as u64, sorted: decode_values(self.p, self.m as u64, &self.data) }
+        Gcs {
+            m: self.m as u64,
+            sorted: decode_values(self.p, self.m as u64, &self.data),
+        }
     }
 }
 
@@ -138,7 +147,16 @@ fn build_filter(ids: &[[u8; 16]], max_bytes: usize) -> (RequestSync, usize) {
     let cap = ((max_bytes * 8) / (p as usize + 2)).max(1);
     let mut n = ids.len().min(cap);
     if n == 0 {
-        return (RequestSync { p, m: 1, data: Vec::new(), types: None, since: None }, 0);
+        return (
+            RequestSync {
+                p,
+                m: 1,
+                data: Vec::new(),
+                types: None,
+                since: None,
+            },
+            0,
+        );
     }
     loop {
         let m = ((n as u64) << p).clamp(1, u32::MAX as u64);
@@ -147,7 +165,16 @@ fn build_filter(ids: &[[u8; 16]], max_bytes: usize) -> (RequestSync, usize) {
         values.dedup();
         let data = encode_values(&values, p);
         if data.len() <= max_bytes || n <= 1 {
-            return (RequestSync { p, m: m as u32, data, types: None, since: None }, n);
+            return (
+                RequestSync {
+                    p,
+                    m: m as u32,
+                    data,
+                    types: None,
+                    since: None,
+                },
+                n,
+            );
         }
         n = (n * 9) / 10;
     }
@@ -185,7 +212,9 @@ fn decode_values(p: u8, m: u64, data: &[u8]) -> Vec<u64> {
             }
         }
         let Some(rem) = r.bits(p) else { return out };
-        let Some(x) = q.checked_shl(p as u32).and_then(|v| v.checked_add(rem + 1)) else { return out };
+        let Some(x) = q.checked_shl(p as u32).and_then(|v| v.checked_add(rem + 1)) else {
+            return out;
+        };
         acc = acc.saturating_add(x);
         if acc >= m {
             break;
@@ -261,7 +290,11 @@ mod tests {
 
     /// Newest first: timestamps count down.
     fn entries(n: usize, seed: u8) -> Vec<([u8; 16], u64)> {
-        ids(n, seed).into_iter().enumerate().map(|(i, id)| (id, 1_000_000 - i as u64)).collect()
+        ids(n, seed)
+            .into_iter()
+            .enumerate()
+            .map(|(i, id)| (id, 1_000_000 - i as u64))
+            .collect()
     }
 
     #[test]
@@ -307,17 +340,35 @@ mod tests {
 
     #[test]
     fn tlv_layout_and_limits() {
-        let req = RequestSync { p: 7, m: 0x01020304, data: vec![0xAB], types: None, since: None };
-        assert_eq!(req.encode(), vec![0x01, 0, 1, 7, 0x02, 0, 4, 1, 2, 3, 4, 0x03, 0, 1, 0xAB]);
+        let req = RequestSync {
+            p: 7,
+            m: 0x01020304,
+            data: vec![0xAB],
+            types: None,
+            since: None,
+        };
+        assert_eq!(
+            req.encode(),
+            vec![0x01, 0, 1, 7, 0x02, 0, 4, 1, 2, 3, 4, 0x03, 0, 1, 0xAB]
+        );
         let mut big = vec![0x01, 0, 1, 7, 0x02, 0, 4, 0, 0, 1, 0, 0x03, 0x04, 0x01];
         big.extend(vec![0; 1025]);
         assert!(RequestSync::decode(&big).is_none());
-        assert!(RequestSync::decode(&[0x01, 0, 1, 0, 0x02, 0, 4, 0, 0, 0, 1, 0x03, 0, 0]).is_none());
+        assert!(
+            RequestSync::decode(&[0x01, 0, 1, 0, 0x02, 0, 4, 0, 0, 0, 1, 0x03, 0, 0]).is_none()
+        );
     }
 
     #[test]
     fn ios_type_flags() {
-        let mut bytes = RequestSync { p: 7, m: 1, data: vec![], types: None, since: None }.encode();
+        let mut bytes = RequestSync {
+            p: 7,
+            m: 1,
+            data: vec![],
+            types: None,
+            since: None,
+        }
+        .encode();
         assert!(RequestSync::decode(&bytes).unwrap().wants(TYPE_MESSAGE));
         bytes.extend([0x04, 0, 1, TYPE_ANNOUNCE as u8]);
         let req = RequestSync::decode(&bytes).unwrap();
@@ -327,16 +378,31 @@ mod tests {
 
     #[test]
     fn since_tlv_is_big_endian() {
-        let req = RequestSync { p: 7, m: 1, data: vec![], types: None, since: Some(0x0102030405060708) };
+        let req = RequestSync {
+            p: 7,
+            m: 1,
+            data: vec![],
+            types: None,
+            since: Some(0x0102030405060708),
+        };
         let bytes = req.encode();
-        assert_eq!(&bytes[bytes.len() - 11..], &[0x05, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            &bytes[bytes.len() - 11..],
+            &[0x05, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
         assert_eq!(RequestSync::decode(&bytes).unwrap().since, req.since);
     }
 
     #[test]
     fn hostile_filter_is_bounded() {
         // All ones: an endless unary quotient.
-        let req = RequestSync { p: 7, m: u32::MAX, data: vec![0xFF; 1024], types: None, since: None };
+        let req = RequestSync {
+            p: 7,
+            m: u32::MAX,
+            data: vec![0xFF; 1024],
+            types: None,
+            since: None,
+        };
         assert!(req.filter().sorted.is_empty());
     }
 }

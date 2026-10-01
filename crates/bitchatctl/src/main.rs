@@ -39,9 +39,21 @@ fn run() -> Result<()> {
         "status" => {
             let s = client.call("status", json!({}))?;
             let radio = &s["radio"];
-            println!("me       {} ({})", s["me"]["nickname"].as_str().unwrap_or("?"), s["me"]["peerId"].as_str().unwrap_or("?"));
-            println!("radio    {}{}", radio["state"].as_str().unwrap_or("?"), detail(radio));
-            println!("mode     {} (effective {})", s["settings"]["mode"].as_str().unwrap_or("?"), radio["effective"].as_str().unwrap_or("?"));
+            println!(
+                "me       {} ({})",
+                s["me"]["nickname"].as_str().unwrap_or("?"),
+                s["me"]["peerId"].as_str().unwrap_or("?")
+            );
+            println!(
+                "radio    {}{}",
+                radio["state"].as_str().unwrap_or("?"),
+                detail(radio)
+            );
+            println!(
+                "mode     {} (effective {})",
+                s["settings"]["mode"].as_str().unwrap_or("?"),
+                radio["effective"].as_str().unwrap_or("?")
+            );
             println!("links    {}", radio["links"]);
             println!("peers    {}", s["peers"].as_array().map_or(0, Vec::len));
         }
@@ -56,7 +68,11 @@ fn run() -> Result<()> {
                     "{:<16} {}  {}",
                     safe(p["nickname"].as_str().unwrap_or("?")),
                     p["id"].as_str().unwrap_or("?"),
-                    if p["direct"].as_bool() == Some(true) { "direct" } else { "via mesh" }
+                    if p["direct"].as_bool() == Some(true) {
+                        "direct"
+                    } else {
+                        "via mesh"
+                    }
                 );
             }
         }
@@ -65,7 +81,10 @@ fn run() -> Result<()> {
             if text.trim().is_empty() {
                 bail!("nothing to send");
             }
-            client.call("send", json!({ "text": text }))?;
+            let result = client.call("send", json!({ "text": text }))?;
+            if let Some(warning) = history_warning(&result) {
+                eprintln!("{warning}");
+            }
         }
         "log" => {
             let n: usize = rest.first().map(|s| s.parse()).transpose()?.unwrap_or(20);
@@ -81,8 +100,14 @@ fn run() -> Result<()> {
                 let v = client.read()?;
                 match v["event"].as_str() {
                     Some("message") => print_message(&v["data"]),
-                    Some("peers") => println!("-- {} peers", v["data"].as_array().map_or(0, Vec::len)),
-                    Some("status") => println!("-- radio {}{}", v["data"]["state"].as_str().unwrap_or("?"), detail(&v["data"])),
+                    Some("peers") => {
+                        println!("-- {} peers", v["data"].as_array().map_or(0, Vec::len))
+                    }
+                    Some("status") => println!(
+                        "-- radio {}{}",
+                        v["data"]["state"].as_str().unwrap_or("?"),
+                        detail(&v["data"])
+                    ),
                     _ => {}
                 }
             }
@@ -92,12 +117,23 @@ fn run() -> Result<()> {
             client.call("setNickname", json!({ "nickname": nick }))?;
         }
         "forget" => {
-            let id = rest.first().ok_or_else(|| anyhow!("forget needs a peer id (bitchatctl peers)"))?;
+            let id = rest
+                .first()
+                .ok_or_else(|| anyhow!("forget needs a peer id (bitchatctl peers)"))?;
             let forgot = client.call("forgetPeer", json!({ "peerId": id }))?;
-            println!("{}", if forgot.as_bool() == Some(true) { "forgotten" } else { "not known" });
+            println!(
+                "{}",
+                if forgot.as_bool() == Some(true) {
+                    "forgotten"
+                } else {
+                    "not known"
+                }
+            );
         }
         "mode" => {
-            let mode = rest.first().ok_or_else(|| anyhow!("mode needs auto, balanced, saver or off"))?;
+            let mode = rest
+                .first()
+                .ok_or_else(|| anyhow!("mode needs auto, balanced, saver or off"))?;
             client.call("setMode", json!({ "mode": mode }))?;
         }
         "json" => {
@@ -106,7 +142,10 @@ fn run() -> Result<()> {
                 Some(p) => serde_json::from_str(p).context("params must be JSON")?,
                 None => json!({}),
             };
-            println!("{}", serde_json::to_string_pretty(&client.call(method, params)?)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&client.call(method, params)?)?
+            );
         }
         "-h" | "--help" | "help" => println!("{USAGE}"),
         other => bail!("unknown command {other:?}\n\n{USAGE}"),
@@ -115,7 +154,16 @@ fn run() -> Result<()> {
 }
 
 fn detail(radio: &Value) -> String {
-    radio["detail"].as_str().map(|d| format!(" ({d})")).unwrap_or_default()
+    radio["detail"]
+        .as_str()
+        .map(|d| format!(" ({d})"))
+        .unwrap_or_default()
+}
+
+fn history_warning(result: &Value) -> Option<String> {
+    result["historyError"]
+        .as_str()
+        .map(|error| format!("bitchatctl: mesh history error: {}", safe(error)))
 }
 
 fn print_message(m: &Value) {
@@ -143,7 +191,6 @@ fn safe(s: &str) -> String {
     out
 }
 
-
 struct Client {
     reader: BufReader<UnixStream>,
     writer: UnixStream,
@@ -155,9 +202,16 @@ impl Client {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
         let path = PathBuf::from(dir).join("bitchat-linux").join("mesh.sock");
         let stream = UnixStream::connect(&path).with_context(|| {
-            format!("can't reach bitchatd at {} (run bitchatd first)", path.display())
+            format!(
+                "can't reach bitchatd at {} (run bitchatd first)",
+                path.display()
+            )
         })?;
-        Ok(Client { reader: BufReader::new(stream.try_clone()?), writer: stream, next_id: 1 })
+        Ok(Client {
+            reader: BufReader::new(stream.try_clone()?),
+            writer: stream,
+            next_id: 1,
+        })
     }
 
     fn read(&mut self) -> Result<Value> {
@@ -171,7 +225,11 @@ impl Client {
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
         let id = self.next_id;
         self.next_id += 1;
-        writeln!(self.writer, "{}", json!({ "id": id, "method": method, "params": params }))?;
+        writeln!(
+            self.writer,
+            "{}",
+            json!({ "id": id, "method": method, "params": params })
+        )?;
         loop {
             let v = self.read()?;
             if v["id"].as_u64() != Some(id) {
@@ -187,7 +245,17 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use super::safe;
+    use super::{history_warning, safe};
+    use serde_json::json;
+
+    #[test]
+    fn history_warnings_are_visible_and_terminal_safe() {
+        assert_eq!(history_warning(&json!(true)), None);
+        assert_eq!(
+            history_warning(&json!({ "historyError": "disk full\n\u{1b}[2J" })),
+            Some("bitchatctl: mesh history error: disk full\\n\\u{1b}[2J".into()),
+        );
+    }
 
     #[test]
     fn escapes_terminal_controls() {

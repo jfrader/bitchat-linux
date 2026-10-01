@@ -17,7 +17,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use crate::config::private_directory;
-use crate::types::{self, Room, Update};
+use crate::types::{self, Notice, Room, Update};
 
 const KIND_CHAT: Kind = Kind::Custom(20_000);
 const DIRECTORY: &str =
@@ -282,9 +282,10 @@ async fn connect(
         let (urls, fallback) = discover(&geohash).await?;
         if fallback {
             updates
-                .send(Update::Notice(
-                    "Using bundled relay directory (live directory unavailable)".into(),
-                ))
+                .send(Update::Notice(Notice::in_room(
+                    Room::Internet(geohash.clone()),
+                    "Using bundled relay directory (live directory unavailable)",
+                )))
                 .await?;
         }
         urls
@@ -307,9 +308,10 @@ async fn connect(
             Ok(Ok(_)) => {}
             other => {
                 updates
-                    .send(Update::Notice(bitchatd::clean_message(&format!(
-                        "{url}: {other:?}"
-                    ))))
+                    .send(Update::Notice(Notice::in_room(
+                        Room::Internet(geohash.clone()),
+                        bitchatd::clean_message(&format!("{url}: {other:?}")),
+                    )))
                     .await?
             }
         }
@@ -336,17 +338,19 @@ async fn connect(
         Ok(Ok(result)) => {
             for (relay, err) in result.failed {
                 updates
-                    .send(Update::Notice(bitchatd::clean_message(&format!(
-                        "{relay}: {err}"
-                    ))))
+                    .send(Update::Notice(Notice::in_room(
+                        Room::Internet(geohash.clone()),
+                        bitchatd::clean_message(&format!("{relay}: {err}")),
+                    )))
                     .await?;
             }
         }
         other => {
             updates
-                .send(Update::Notice(bitchatd::clean_message(&format!(
-                    "Subscription failed: {other:?}"
-                ))))
+                .send(Update::Notice(Notice::in_room(
+                    Room::Internet(geohash.clone()),
+                    bitchatd::clean_message(&format!("Subscription failed: {other:?}")),
+                )))
                 .await?
         }
     }
@@ -453,7 +457,7 @@ pub async fn run(
                 Some(Command::Join(raw)) => {
                     let geohash = match types::parse_geohash(&raw) {
                         Ok(code) => code,
-                        Err(e) => { updates.send(Update::Notice(e.to_string())).await?; continue }
+                         Err(e) => { updates.send(Update::Notice(e.to_string().into())).await?; continue }
                     };
                     drop(setup.take());
                     cancel_publish(&mut pending, &mut seen, &mut order, &updates, "Channel changed before relay acknowledged the message").await?;
@@ -487,7 +491,7 @@ pub async fn run(
                 match result {
                     Ok(connected) => session = Some(connected),
                     Err(e) => {
-                        updates.send(Update::Notice(bitchatd::clean_message(&format!("{e:#}")))).await?;
+                         updates.send(Update::Notice(Notice::in_room(Room::Internet(room.clone()), bitchatd::clean_message(&format!("{e:#}"))))).await?;
                         updates.send(Update::InternetStatus { geohash: Some(room.clone()), detail: format!("#{room}: disconnected"), connected: 0 }).await?;
                     }
                 }
@@ -498,7 +502,7 @@ pub async fn run(
                     match result {
                         Ok((event, failures)) => {
                             if !failures.is_empty() {
-                                updates.send(Update::Notice(format!("Some relays rejected the message: {}", failures.join("; ")))).await?;
+                                 updates.send(Update::Notice(Notice::in_room(Room::Internet(publish.geohash.clone()), format!("Some relays rejected the message: {}", failures.join("; "))))).await?;
                             }
                             if let Some(message) = unpack(&event, &publish.geohash, true) { updates.send(Update::Message(message)).await? }
                         }

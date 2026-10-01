@@ -23,10 +23,14 @@ use bitchat_proto::{CHARACTERISTIC_UUID, FRAGMENT_THRESHOLD, Packet, SERVICE_UUI
 use bluer::adv::{Advertisement, AdvertisementHandle, Type as AdvType};
 use bluer::gatt::local::{
     Application, ApplicationHandle, Characteristic, CharacteristicNotifier, CharacteristicNotify,
-    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod, Service,
+    CharacteristicNotifyMethod, CharacteristicRead, CharacteristicWrite, CharacteristicWriteMethod,
+    Service,
 };
 use bluer::gatt::remote;
-use bluer::{Adapter, AdapterEvent, Address, DeviceEvent, DeviceProperty, DiscoveryFilter, DiscoveryTransport, Session, Uuid};
+use bluer::{
+    Adapter, AdapterEvent, Address, DeviceEvent, DeviceProperty, DiscoveryFilter,
+    DiscoveryTransport, Session, Uuid,
+};
 use futures::{FutureExt, Stream, StreamExt};
 use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinSet;
@@ -120,8 +124,15 @@ struct RadioSession<'a> {
 
 impl Drop for RadioSession<'_> {
     fn drop(&mut self) {
-        self.radio.tasks.lock().unwrap_or_else(|e| e.into_inner()).abort_all();
-        self.current.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.radio
+            .tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .abort_all();
+        self.current
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         self.radio.node.set_radio(|r| {
             r.advertising = false;
             r.scanning = false;
@@ -174,7 +185,10 @@ impl Radio {
     }
 
     fn central_count(&self) -> usize {
-        self.lock_links().values().filter(|l| matches!(l.kind, LinkKind::Central { .. })).count()
+        self.lock_links()
+            .values()
+            .filter(|l| matches!(l.kind, LinkKind::Central { .. }))
+            .count()
     }
 
     // ---------- sending ----------
@@ -191,7 +205,8 @@ impl Radio {
                 if let LinkKind::Peripheral { mtu } = link.kind
                     && mtu.saturating_sub(3) >= MIN_FRAME
                 {
-                    peripheral_min_mtu = Some(peripheral_min_mtu.map_or(mtu, |m: usize| m.min(mtu)));
+                    peripheral_min_mtu =
+                        Some(peripheral_min_mtu.map_or(mtu, |m: usize| m.min(mtu)));
                 }
                 let selected = match out.target {
                     Target::All => true,
@@ -202,7 +217,9 @@ impl Radio {
                     continue;
                 }
                 match &link.kind {
-                    LinkKind::Central { tx, max_frame, .. } => central.push((tx.clone(), *max_frame)),
+                    LinkKind::Central { tx, max_frame, .. } => {
+                        central.push((tx.clone(), *max_frame))
+                    }
                     LinkKind::Peripheral { .. } => peripheral_targeted = true,
                 }
             }
@@ -219,13 +236,17 @@ impl Radio {
 
         if peripheral_targeted {
             // BlueZ cuts each notification to the central's ATT MTU - 3.
-            let max_frame = peripheral_min_mtu.map_or(FRAGMENT_THRESHOLD, |mtu| frame_limit(mtu.saturating_sub(3)));
+            let max_frame = peripheral_min_mtu
+                .map_or(FRAGMENT_THRESHOLD, |mtu| frame_limit(mtu.saturating_sub(3)));
             let frames = frames(&out.packet, max_frame);
             // Bounded: when the radio can't keep up (a flood), drop rather
             // than queue without limit.
-            let queued = self.notify_queued.fetch_add(frames.len(), Ordering::Relaxed);
+            let queued = self
+                .notify_queued
+                .fetch_add(frames.len(), Ordering::Relaxed);
             if queued + frames.len() > MAX_NOTIFY_QUEUE {
-                self.notify_queued.fetch_sub(frames.len(), Ordering::Relaxed);
+                self.notify_queued
+                    .fetch_sub(frames.len(), Ordering::Relaxed);
                 tracing::debug!("notify queue full; dropping a packet");
                 return;
             }
@@ -275,7 +296,12 @@ impl Radio {
                         method: CharacteristicWriteMethod::Fun(Box::new(move |value, req| {
                             let radio = on_write.clone();
                             async move {
-                                radio.on_peripheral_write(req.device_address, value, req.offset as usize, req.mtu as usize);
+                                radio.on_peripheral_write(
+                                    req.device_address,
+                                    value,
+                                    req.offset as usize,
+                                    req.mtu as usize,
+                                );
                                 Ok(())
                             }
                             .boxed()
@@ -321,7 +347,9 @@ impl Radio {
                 }
             } else {
                 let complete = match bufs.get_mut(&addr) {
-                    Some(buf) if buf.len() == offset && buf.len() + value.len() <= MAX_WRITE_BUFFER => {
+                    Some(buf)
+                        if buf.len() == offset && buf.len() + value.len() <= MAX_WRITE_BUFFER =>
+                    {
                         buf.extend_from_slice(&value);
                         whole(buf)
                     }
@@ -344,16 +372,24 @@ impl Radio {
         let mut links = self.lock_links();
         for (&id, link) in links.iter_mut() {
             if link.addr == addr
-                && let LinkKind::Peripheral { mtu: m } = &mut link.kind {
-                    if mtu > 0 {
-                        *m = mtu;
-                    }
-                    return id;
+                && let LinkKind::Peripheral { mtu: m } = &mut link.kind
+            {
+                if mtu > 0 {
+                    *m = mtu;
                 }
+                return id;
+            }
         }
         let id = NEXT_LINK.fetch_add(1, Ordering::Relaxed);
         let mtu = if mtu > 0 { mtu } else { DEFAULT_CENTRAL_MTU };
-        links.insert(id, Link { addr, kind: LinkKind::Peripheral { mtu }, since: Instant::now() });
+        links.insert(
+            id,
+            Link {
+                addr,
+                kind: LinkKind::Peripheral { mtu },
+                since: Instant::now(),
+            },
+        );
         drop(links);
         tracing::info!("{addr} connected to us (link {id}, mtu {mtu})");
         self.node.on_link_up(id);
@@ -400,7 +436,11 @@ impl Radio {
 
     /// Consume discovery events for `duration`, then drop the stream, which
     /// stops discovery. A scan left running starves Bluetooth audio.
-    async fn scan_burst(self: &Arc<Self>, stream: impl Stream<Item = AdapterEvent>, duration: Duration) {
+    async fn scan_burst(
+        self: &Arc<Self>,
+        stream: impl Stream<Item = AdapterEvent>,
+        duration: Duration,
+    ) {
         let deadline = tokio::time::sleep(duration);
         tokio::pin!(deadline, stream);
         loop {
@@ -425,7 +465,9 @@ impl Radio {
             return;
         };
         for addr in addrs {
-            let Ok(device) = self.adapter.device(addr) else { continue };
+            let Ok(device) = self.adapter.device(addr) else {
+                continue;
+            };
             if device.is_connected().await.unwrap_or(false) {
                 self.consider(addr, false).await;
             }
@@ -439,30 +481,55 @@ impl Radio {
         if self.has_link_to(addr) || self.central_count() >= MAX_CENTRAL_LINKS {
             return;
         }
-        if let Some(until) = self.suppressed.lock().unwrap_or_else(|e| e.into_inner()).get(&addr)
+        if let Some(until) = self
+            .suppressed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&addr)
             && Instant::now() < *until
         {
             return;
         }
-        if let Some((_, until)) = self.failures.lock().unwrap_or_else(|e| e.into_inner()).get(&addr)
-            && Instant::now() < *until {
-                return;
-            }
-        let Ok(device) = self.adapter.device(addr) else { return };
-        let has_service = device.uuids().await.ok().flatten().is_some_and(|u| u.contains(&SERVICE));
+        if let Some((_, until)) = self
+            .failures
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&addr)
+            && Instant::now() < *until
+        {
+            return;
+        }
+        let Ok(device) = self.adapter.device(addr) else {
+            return;
+        };
+        let has_service = device
+            .uuids()
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|u| u.contains(&SERVICE));
         if !has_service {
             return;
         }
         if in_range && !matches!(device.rssi().await, Ok(Some(rssi)) if rssi >= RSSI_FLOOR) {
             return;
         }
-        if !self.connecting.lock().unwrap_or_else(|e| e.into_inner()).insert(addr) {
+        if !self
+            .connecting
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(addr)
+        {
             return;
         }
         let radio = self.clone();
         self.spawn(async move {
             let result = radio.clone().central_link(addr).await;
-            radio.connecting.lock().unwrap_or_else(|e| e.into_inner()).remove(&addr);
+            radio
+                .connecting
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&addr);
             let mut failures = radio.failures.lock().unwrap_or_else(|e| e.into_inner());
             match result {
                 Ok(()) => {
@@ -472,7 +539,11 @@ impl Radio {
                     let n = failures.get(&addr).map_or(0, |(n, _)| *n) + 1;
                     // Three quick retries 5 s apart, then back off (address
                     // rotation makes a dead address common).
-                    let wait = if n < 3 { Duration::from_secs(5) } else { Duration::from_secs(120) };
+                    let wait = if n < 3 {
+                        Duration::from_secs(5)
+                    } else {
+                        Duration::from_secs(120)
+                    };
                     failures.insert(addr, (n, Instant::now() + wait));
                     tracing::debug!("central link to {addr} failed ({n}): {e:#}");
                 }
@@ -531,7 +602,12 @@ impl Radio {
             id,
             Link {
                 addr,
-                kind: LinkKind::Central { tx, max_frame, close: close.clone(), initiated: !was_connected },
+                kind: LinkKind::Central {
+                    tx,
+                    max_frame,
+                    close: close.clone(),
+                    initiated: !was_connected,
+                },
                 since: Instant::now(),
             },
         );
@@ -602,7 +678,10 @@ impl Radio {
                 };
                 if !connected {
                     self.lock_links().remove(&id);
-                    self.write_bufs.lock().unwrap_or_else(|e| e.into_inner()).remove(&addr);
+                    self.write_bufs
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&addr);
                     tracing::info!("{addr} disconnected from us (link {id})");
                     self.node.on_link_down(id);
                 }
@@ -612,7 +691,9 @@ impl Radio {
             let silent: Vec<(Address, Arc<Notify>)> = self
                 .lock_links()
                 .iter()
-                .filter(|(id, l)| l.since.elapsed() > ANNOUNCE_DEADLINE && self.node.link_peer(**id).is_none())
+                .filter(|(id, l)| {
+                    l.since.elapsed() > ANNOUNCE_DEADLINE && self.node.link_peer(**id).is_none()
+                })
                 .filter_map(|(_, l)| match &l.kind {
                     LinkKind::Central { close, .. } => Some((l.addr, close.clone())),
                     LinkKind::Peripheral { .. } => None,
@@ -631,10 +712,16 @@ impl Radio {
                 .unwrap_or_else(|e| e.into_inner())
                 .retain(|_, (_, until)| Instant::now() < *until + Duration::from_secs(600));
 
-            let mut by_peer: HashMap<bitchat_proto::PeerId, Vec<(Instant, Address, Arc<Notify>)>> = HashMap::new();
+            let mut by_peer: HashMap<bitchat_proto::PeerId, Vec<(Instant, Address, Arc<Notify>)>> =
+                HashMap::new();
             for (&id, link) in self.lock_links().iter() {
-                if let (LinkKind::Central { close, .. }, Some(peer)) = (&link.kind, self.node.link_peer(id)) {
-                    by_peer.entry(peer).or_default().push((link.since, link.addr, close.clone()));
+                if let (LinkKind::Central { close, .. }, Some(peer)) =
+                    (&link.kind, self.node.link_peer(id))
+                {
+                    by_peer
+                        .entry(peer)
+                        .or_default()
+                        .push((link.since, link.addr, close.clone()));
                 }
             }
             for (_, mut dupes) in by_peer {
@@ -648,7 +735,10 @@ impl Radio {
                     close.notify_one();
                 }
             }
-            self.suppressed.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, until| Instant::now() < *until);
+            self.suppressed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|_, until| Instant::now() < *until);
 
             if last_cleanup.elapsed() >= CLEANUP_INTERVAL {
                 last_cleanup = Instant::now();
@@ -660,10 +750,19 @@ impl Radio {
     /// Phones rotate their address every ~15 minutes; each old address stays
     /// in BlueZ's device list. Remove unconnected, unpaired bitchat devices.
     async fn forget_stale_devices(&self) {
-        let Ok(addrs) = self.adapter.device_addresses().await else { return };
+        let Ok(addrs) = self.adapter.device_addresses().await else {
+            return;
+        };
         for addr in addrs {
-            let Ok(d) = self.adapter.device(addr) else { continue };
-            let ours = d.uuids().await.ok().flatten().is_some_and(|u| u.contains(&SERVICE));
+            let Ok(d) = self.adapter.device(addr) else {
+                continue;
+            };
+            let ours = d
+                .uuids()
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|u| u.contains(&SERVICE));
             let busy = d.is_connected().await.unwrap_or(true)
                 || d.is_paired().await.unwrap_or(true)
                 || d.is_trusted().await.unwrap_or(true);
@@ -676,14 +775,20 @@ impl Radio {
     /// Tear the session down: every link goes down in the mesh, and
     /// connections we opened are closed.
     async fn shutdown(&self) {
-        self.tasks.lock().unwrap_or_else(|e| e.into_inner()).abort_all();
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .abort_all();
         let links: Vec<(LinkId, Link)> = self.lock_links().drain().collect();
         for (id, link) in links {
             self.node.on_link_down(id);
-            if let LinkKind::Central { initiated: true, .. } = link.kind
-                && let Ok(d) = self.adapter.device(link.addr) {
-                    let _ = d.disconnect().await;
-                }
+            if let LinkKind::Central {
+                initiated: true, ..
+            } = link.kind
+                && let Ok(d) = self.adapter.device(link.addr)
+            {
+                let _ = d.disconnect().await;
+            }
         }
         *self.notifier.lock().await = None;
     }
@@ -701,7 +806,11 @@ fn frames(packet: &Packet, max_frame: usize) -> Vec<Vec<u8>> {
         .iter()
         .filter_map(|p| {
             let padded = p.encode_for_ble().ok()?;
-            if padded.len() <= max_frame { Some(padded) } else { p.encode(false).ok() }
+            if padded.len() <= max_frame {
+                Some(padded)
+            } else {
+                p.encode(false).ok()
+            }
         })
         .collect()
 }
@@ -727,7 +836,9 @@ async fn find_characteristic(device: &bluer::Device) -> Result<remote::Character
     Err(anyhow!("no bitchat characteristic"))
 }
 
-async fn next_event(events: &mut Option<impl Stream<Item = DeviceEvent> + Unpin>) -> Option<DeviceEvent> {
+async fn next_event(
+    events: &mut Option<impl Stream<Item = DeviceEvent> + Unpin>,
+) -> Option<DeviceEvent> {
     match events {
         Some(s) => s.next().await,
         None => std::future::pending().await,
@@ -747,7 +858,9 @@ impl Notifications {
             Ok(reader) => Ok(Notifications::Io(reader)),
             Err(e) => {
                 tracing::debug!("notify_io unavailable ({e}); using D-Bus notifications");
-                Ok(Notifications::Stream(Box::pin(chr.notify().await.context("subscribing")?)))
+                Ok(Notifications::Stream(Box::pin(
+                    chr.notify().await.context("subscribing")?,
+                )))
             }
         }
     }
@@ -845,8 +958,13 @@ pub async fn supervise(node: Arc<Node>, mut out_rx: mpsc::UnboundedReceiver<Outg
                 // Back off exponentially: if bluetoothd keeps dying (it has a
                 // crash we can trip), hammering it only makes a crash loop.
                 failures += 1;
-                let wait = RETRY_BASE.saturating_mul(1 << (failures - 1).min(6)).min(RETRY_MAX);
-                tracing::warn!("radio session ended: {e:#}; retrying in {}s", wait.as_secs());
+                let wait = RETRY_BASE
+                    .saturating_mul(1 << (failures - 1).min(6))
+                    .min(RETRY_MAX);
+                tracing::warn!(
+                    "radio session ended: {e:#}; retrying in {}s",
+                    wait.as_secs()
+                );
                 node.set_radio(|r| {
                     r.state = RadioState::Error;
                     r.detail = Some(format!("{e:#}"));
@@ -880,13 +998,19 @@ async fn run_session(
     }
 
     let radio = Radio::new(node.clone(), adapter.clone());
-    let _radio_session = RadioSession { radio: &radio, current };
+    let _radio_session = RadioSession {
+        radio: &radio,
+        current,
+    };
     let handles: Result<(ApplicationHandle, AdvertisementHandle)> = async {
         let app = adapter
             .serve_gatt_application(radio.application())
             .await
             .context("registering GATT service")?;
-        let adv = adapter.advertise(advertisement()).await.context("starting advertising")?;
+        let adv = adapter
+            .advertise(advertisement())
+            .await
+            .context("starting advertising")?;
         Ok((app, adv))
     }
     .await;
@@ -958,7 +1082,11 @@ async fn power_loop(node: Arc<Node>, session: Session, eff_tx: watch::Sender<Eff
     loop {
         let mode = *mode_rx.borrow_and_update();
         let on_battery = power::on_battery();
-        let audio = if mode == Mode::Auto { audio_active(&session).await } else { false };
+        let audio = if mode == Mode::Auto {
+            audio_active(&session).await
+        } else {
+            false
+        };
         let effective = power::resolve(mode, on_battery, audio);
         eff_tx.send_if_modified(|e| {
             let changed = *e != effective;
@@ -979,13 +1107,23 @@ async fn power_loop(node: Arc<Node>, session: Session, eff_tx: watch::Sender<Eff
 
 /// Is a connected device an audio sink (headphones, speaker)?
 async fn audio_active(session: &Session) -> bool {
-    let Ok(adapter) = session.default_adapter().await else { return false };
-    let Ok(addrs) = adapter.device_addresses().await else { return false };
+    let Ok(adapter) = session.default_adapter().await else {
+        return false;
+    };
+    let Ok(addrs) = adapter.device_addresses().await else {
+        return false;
+    };
     let sink: Uuid = power::AUDIO_SINK_UUID.parse().expect("valid uuid");
     for addr in addrs {
-        let Ok(d) = adapter.device(addr) else { continue };
+        let Ok(d) = adapter.device(addr) else {
+            continue;
+        };
         if d.is_connected().await.unwrap_or(false)
-            && d.uuids().await.ok().flatten().is_some_and(|u| u.contains(&sink))
+            && d.uuids()
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|u| u.contains(&sink))
         {
             return true;
         }
@@ -1008,7 +1146,9 @@ mod tests {
     #[test]
     fn frames_fit_the_link() {
         let id = Identity::generate();
-        let text: String = (0..900u32).map(|i| char::from(b'a' + ((i * 7 + i / 5) % 26) as u8)).collect();
+        let text: String = (0..900u32)
+            .map(|i| char::from(b'a' + ((i * 7 + i / 5) % 26) as u8))
+            .collect();
         let packet = id.message_packet(&text);
         for limit in [182, 244, 512] {
             let out = frames(&packet, limit);
@@ -1019,7 +1159,11 @@ mod tests {
 
     #[test]
     fn noise_frames_drop_padding_when_it_would_overflow() {
-        let mut p = Packet::new(bitchat_proto::MessageType::NoiseEncrypted, bitchat_proto::PeerId([1; 8]), vec![7; 150]);
+        let mut p = Packet::new(
+            bitchat_proto::MessageType::NoiseEncrypted,
+            bitchat_proto::PeerId([1; 8]),
+            vec![7; 150],
+        );
         p.recipient = Some(bitchat_proto::PeerId([2; 8]));
         // 180 unpadded bytes would pad to 256; a 182-byte link can't take that.
         let out = frames(&p, 182);

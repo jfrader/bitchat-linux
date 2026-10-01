@@ -21,7 +21,12 @@ pub enum RelayDecision {
 
 /// Decide what to do with a validated packet not addressed to us.
 /// `network_size` is the number of known peers.
-pub fn decide(packet: &Packet, me: PeerId, network_size: usize, rng: &mut impl Rng) -> RelayDecision {
+pub fn decide(
+    packet: &Packet,
+    me: PeerId,
+    network_size: usize,
+    rng: &mut impl Rng,
+) -> RelayDecision {
     if packet.sender == me || packet.ttl <= 1 {
         return RelayDecision::Drop;
     }
@@ -29,9 +34,10 @@ pub fn decide(packet: &Packet, me: PeerId, network_size: usize, rng: &mut impl R
         return RelayDecision::Drop;
     }
     if let Some(r) = packet.recipient
-        && r == me {
-            return RelayDecision::Drop;
-        }
+        && r == me
+    {
+        return RelayDecision::Drop;
+    }
 
     let mut out = packet.clone();
     out.ttl = out.ttl.min(crate::MAX_TTL) - 1;
@@ -48,9 +54,10 @@ pub fn decide(packet: &Packet, me: PeerId, network_size: usize, rng: &mut impl R
         if let Some(pos) = out.route.iter().position(|&h| h == me) {
             let next = out.route.get(pos + 1).copied().or(out.recipient);
             if let Some(next) = next
-                && !next.is_broadcast() {
-                    return RelayDecision::NextHop(next, out);
-                }
+                && !next.is_broadcast()
+            {
+                return RelayDecision::NextHop(next, out);
+            }
         }
     }
 
@@ -70,13 +77,14 @@ pub fn decide(packet: &Packet, me: PeerId, network_size: usize, rng: &mut impl R
         return RelayDecision::Drop;
     }
 
-    let jitter_ms = if out.ptype == MessageType::Fragment as u8 || out.ptype == MessageType::VoiceFrame as u8 {
-        rng.gen_range(8..=25)
-    } else if !out.is_broadcast() || out.ptype == MessageType::NoiseHandshake as u8 {
-        rng.gen_range(10..=35)
-    } else {
-        rng.gen_range(10..=220)
-    };
+    let jitter_ms =
+        if out.ptype == MessageType::Fragment as u8 || out.ptype == MessageType::VoiceFrame as u8 {
+            rng.gen_range(8..=25)
+        } else if !out.is_broadcast() || out.ptype == MessageType::NoiseHandshake as u8 {
+            rng.gen_range(10..=35)
+        } else {
+            rng.gen_range(10..=220)
+        };
     RelayDecision::Flood(out, Duration::from_millis(jitter_ms))
 }
 
@@ -135,7 +143,9 @@ mod tests {
         assert!(matches!(decide(&p, me(), 3, &mut rng), RelayDecision::NextHop(n, _) if n == next));
         // Last intermediate hop forwards to the recipient.
         p.route = vec![me()];
-        assert!(matches!(decide(&p, me(), 3, &mut rng), RelayDecision::NextHop(n, _) if n == PeerId([0xCC; 8])));
+        assert!(
+            matches!(decide(&p, me(), 3, &mut rng), RelayDecision::NextHop(n, _) if n == PeerId([0xCC; 8]))
+        );
         // Loops are dropped.
         p.route = vec![me(), next, me()];
         assert_eq!(decide(&p, me(), 3, &mut rng), RelayDecision::Drop);
@@ -145,7 +155,12 @@ mod tests {
     fn large_networks_relay_low_ttl_probabilistically() {
         let mut rng = StdRng::seed_from_u64(7);
         let relayed = (0..1000)
-            .filter(|_| matches!(decide(&pkt(3), me(), 200, &mut rng), RelayDecision::Flood(..)))
+            .filter(|_| {
+                matches!(
+                    decide(&pkt(3), me(), 200, &mut rng),
+                    RelayDecision::Flood(..)
+                )
+            })
             .count();
         assert!((300..500).contains(&relayed), "{relayed}");
     }

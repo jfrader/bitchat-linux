@@ -242,7 +242,11 @@ fn dispatch(node: &Node, method: &str, params: &Value) -> Result<Value, String> 
             serde_json::to_value(node.snapshot(crate::node::SNAPSHOT_MESSAGES))
                 .map_err(|e| e.to_string())
         }
-        "send" => node.send_text(str_param("text")?).map(|_| json!(true)),
+        "send" => node.send_text(str_param("text")?).map(|outcome| {
+            outcome
+                .history_error
+                .map_or_else(|| json!(true), |error| json!({ "historyError": error }))
+        }),
         "setNickname" => node
             .set_nickname(str_param("nickname")?)
             .map(|_| json!(true)),

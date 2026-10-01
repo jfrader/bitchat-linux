@@ -11,10 +11,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
 
-use crate::Snapshot;
 use crate::mesh::{Effect, Event, LinkId, Mesh, Target};
 use crate::power::Effective;
 use crate::store::{Mode, Settings, Store};
+use crate::{SendOutcome, Snapshot};
 
 /// Longest message we accept from the UI, in bytes. Fragmentation carries
 /// it, but Android refuses sets above 256 fragments; this stays far below.
@@ -124,13 +124,13 @@ impl Node {
 
     pub fn on_frame(&self, link: LinkId, frame: &[u8]) {
         let fx = self.with_mesh(|m, rng| m.on_frame(link, frame, bitchat_proto::now_ms(), rng));
-        self.apply(fx);
+        let _ = self.apply(fx);
     }
 
     pub fn on_link_up(&self, link: LinkId) {
         let (fx, n) = self.with_mesh(|m, _| (m.on_link_up(link), m.link_count()));
         self.set_radio(|r| r.links = n);
-        self.apply(fx);
+        let _ = self.apply(fx);
     }
 
     pub fn on_link_down(&self, link: LinkId) {
@@ -141,7 +141,7 @@ impl Node {
             )
         });
         self.set_radio(|r| r.links = n);
-        self.apply(fx);
+        let _ = self.apply(fx);
     }
 
     pub fn tick(&self) {
@@ -152,10 +152,10 @@ impl Node {
         {
             tracing::warn!("saving pinned keys: {e:#}");
         }
-        self.apply(fx);
+        let _ = self.apply(fx);
     }
 
-    pub fn send_text(&self, text: &str) -> Result<(), String> {
+    pub fn send_text(&self, text: &str) -> Result<SendOutcome, String> {
         if text.len() > MAX_TEXT_BYTES {
             return Err(format!("message is longer than {MAX_TEXT_BYTES} bytes"));
         }
@@ -163,8 +163,9 @@ impl Node {
             return Err("message is empty".into());
         }
         let fx = self.with_mesh(|m, _| m.send_text(text, bitchat_proto::now_ms()));
-        self.apply(fx);
-        Ok(())
+        Ok(SendOutcome {
+            history_error: self.apply(fx),
+        })
     }
 
     pub fn set_nickname(&self, nick: &str) -> Result<(), String> {
@@ -175,7 +176,7 @@ impl Node {
                 .map_err(|e| format!("saving nickname: {e:#}"))?;
             Ok::<_, String>(fx)
         })?;
-        self.apply(fx);
+        let _ = self.apply(fx);
         Ok(())
     }
 
@@ -292,7 +293,8 @@ impl Node {
         }
     }
 
-    pub fn apply(&self, effects: Vec<Effect>) {
+    pub fn apply(&self, effects: Vec<Effect>) -> Option<String> {
+        let mut history_error = None;
         for effect in effects {
             match effect {
                 Effect::Send {
@@ -326,10 +328,17 @@ impl Node {
                                         self.with_mesh(|m, _| m.messages().cloned().collect());
                                     if let Err(e) = self.store.rewrite_history(&msgs) {
                                         tracing::warn!("compacting history: {e:#}");
+                                        history_error.get_or_insert_with(|| {
+                                            format!("compacting history: {e:#}")
+                                        });
                                     }
                                 }
                                 Ok(_) => {}
-                                Err(e) => tracing::warn!("saving history: {e:#}"),
+                                Err(e) => {
+                                    tracing::warn!("saving history: {e:#}");
+                                    history_error
+                                        .get_or_insert_with(|| format!("saving history: {e:#}"));
+                                }
                             }
                         }
                     }
@@ -339,6 +348,7 @@ impl Node {
                 }
             }
         }
+        history_error
     }
 
     /// Queue a packet directly (the LEAVE on shutdown).
