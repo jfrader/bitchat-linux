@@ -3,7 +3,6 @@ name = "bitchat-proto"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 description = "bitchat mesh wire protocol: packets, padding, compression, fragments, announces, signing"
 
 [dependencies]

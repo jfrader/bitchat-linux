@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+default-members = ["crates/bitchat-linux"]
 
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/derekross/omarchy-bitchat"
 
 [profile.release]
 strip = true

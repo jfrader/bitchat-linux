@@ -113,6 +113,23 @@ struct Radio {
     tasks: Mutex<JoinSet<()>>,
 }
 
+struct RadioSession<'a> {
+    radio: &'a Arc<Radio>,
+    current: &'a Mutex<Option<Arc<Radio>>>,
+}
+
+impl Drop for RadioSession<'_> {
+    fn drop(&mut self) {
+        self.radio.tasks.lock().unwrap_or_else(|e| e.into_inner()).abort_all();
+        self.current.lock().unwrap_or_else(|e| e.into_inner()).take();
+        self.radio.node.set_radio(|r| {
+            r.advertising = false;
+            r.scanning = false;
+            r.links = 0;
+        });
+    }
+}
+
 /// Gives `n` back to a counter when dropped: when its task finishes, is
 /// aborted, or is dropped before it ever ran.
 struct Release(Arc<std::sync::atomic::AtomicUsize>, usize);
@@ -523,7 +540,8 @@ impl Radio {
 
         // Writes run in their own task so a long burst (a sync reply, say)
         // never stops us reading notifications.
-        let mut pump = tokio::spawn(async move {
+        let mut pump = JoinSet::new();
+        pump.spawn(async move {
             while let Some(frame) = rx.recv().await {
                 if writer.send(&frame).await.is_err() {
                     break;
@@ -541,7 +559,7 @@ impl Radio {
                     Some(frame) => self.node.on_frame(id, &frame),
                     None => break,
                 },
-                _ = &mut pump => break,
+                _ = pump.join_next() => break,
                 ev = next_event(&mut events) => {
                     if matches!(ev, Some(DeviceEvent::PropertyChanged(DeviceProperty::Connected(false))) | None) {
                         break;
@@ -551,7 +569,7 @@ impl Radio {
             }
         }
 
-        pump.abort();
+        pump.abort_all();
         self.lock_links().remove(&id);
         self.node.on_link_down(id);
         tracing::info!("central link {id} to {addr} closed");
@@ -757,9 +775,10 @@ impl Notifications {
 /// whichever session is live.
 pub async fn supervise(node: Arc<Node>, mut out_rx: mpsc::UnboundedReceiver<Outgoing>) {
     let current: Arc<Mutex<Option<Arc<Radio>>>> = Arc::new(Mutex::new(None));
+    let mut tasks = JoinSet::new();
 
     let dispatch = current.clone();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         while let Some(out) = out_rx.recv().await {
             let radio = dispatch.lock().unwrap_or_else(|e| e.into_inner()).clone();
             if let Some(radio) = radio {
@@ -781,8 +800,9 @@ pub async fn supervise(node: Arc<Node>, mut out_rx: mpsc::UnboundedReceiver<Outg
         }
     };
 
-    let (eff_tx, mut eff_rx) = watch::channel(Effective::Balanced);
-    tokio::spawn(power_loop(node.clone(), session.clone(), eff_tx));
+    let initial = power::resolve(*node.mode().borrow(), false, false);
+    let (eff_tx, mut eff_rx) = watch::channel(initial);
+    tasks.spawn(power_loop(node.clone(), session.clone(), eff_tx));
 
     let mut failures: u32 = 0;
     loop {
@@ -860,6 +880,7 @@ async fn run_session(
     }
 
     let radio = Radio::new(node.clone(), adapter.clone());
+    let _radio_session = RadioSession { radio: &radio, current };
     let handles: Result<(ApplicationHandle, AdvertisementHandle)> = async {
         let app = adapter
             .serve_gatt_application(radio.application())

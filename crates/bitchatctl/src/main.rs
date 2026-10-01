@@ -153,9 +153,9 @@ struct Client {
 impl Client {
     fn connect() -> Result<Client> {
         let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
-        let path = PathBuf::from(dir).join("bitchat").join("bitchat.sock");
+        let path = PathBuf::from(dir).join("bitchat-linux").join("mesh.sock");
         let stream = UnixStream::connect(&path).with_context(|| {
-            format!("can't reach bitchatd at {} (systemctl --user start bitchat)", path.display())
+            format!("can't reach bitchatd at {} (run bitchatd first)", path.display())
         })?;
         Ok(Client { reader: BufReader::new(stream.try_clone()?), writer: stream, next_id: 1 })
     }

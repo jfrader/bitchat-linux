@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc, watch};
 
+use crate::Snapshot;
 use crate::mesh::{Effect, Event, LinkId, Mesh, Target};
 use crate::power::Effective;
 use crate::store::{Mode, Settings, Store};
@@ -79,7 +80,11 @@ pub struct Node {
 }
 
 impl Node {
-    pub fn new(mesh: Mesh, store: Store, settings: Settings) -> (Arc<Node>, mpsc::UnboundedReceiver<Outgoing>) {
+    pub fn new(
+        mesh: Mesh,
+        store: Store,
+        settings: Settings,
+    ) -> (Arc<Node>, mpsc::UnboundedReceiver<Outgoing>) {
         let (out, out_rx) = mpsc::unbounded_channel();
         let (events, _) = broadcast::channel(256);
         let node = Node {
@@ -101,6 +106,10 @@ impl Node {
 
     pub fn mode(&self) -> watch::Receiver<Mode> {
         self.mode.subscribe()
+    }
+
+    pub fn stop_radio(&self) {
+        self.mode.send_replace(Mode::Off);
     }
 
     fn with_mesh<T>(&self, f: impl FnOnce(&mut Mesh, &mut StdRng) -> T) -> T {
@@ -125,13 +134,19 @@ impl Node {
     }
 
     pub fn on_link_down(&self, link: LinkId) {
-        let (fx, n) = self.with_mesh(|m, _| (m.on_link_down(link, bitchat_proto::now_ms()), m.link_count()));
+        let (fx, n) = self.with_mesh(|m, _| {
+            (
+                m.on_link_down(link, bitchat_proto::now_ms()),
+                m.link_count(),
+            )
+        });
         self.set_radio(|r| r.links = n);
         self.apply(fx);
     }
 
     pub fn tick(&self) {
-        let (fx, pins) = self.with_mesh(|m, rng| (m.tick(bitchat_proto::now_ms(), rng), m.take_dirty_pins()));
+        let (fx, pins) =
+            self.with_mesh(|m, rng| (m.tick(bitchat_proto::now_ms(), rng), m.take_dirty_pins()));
         if let Some(pins) = pins
             && let Err(e) = self.store.save_pins(&pins)
         {
@@ -181,7 +196,9 @@ impl Node {
         drop(s);
         if enabled {
             let msgs: Vec<_> = self.with_mesh(|m, _| m.messages().cloned().collect());
-            self.store.rewrite_history(&msgs).map_err(|e| e.to_string())?;
+            self.store
+                .rewrite_history(&msgs)
+                .map_err(|e| e.to_string())?;
         } else {
             self.store.clear_history().map_err(|e| e.to_string())?;
         }
@@ -203,7 +220,9 @@ impl Node {
     pub fn clear_history(&self) -> Result<(), String> {
         self.with_mesh(|m, _| m.clear_history(bitchat_proto::now_ms()));
         self.store.clear_history().map_err(|e| e.to_string())?;
-        let _ = self.events.send(json!({ "event": "cleared", "data": null }));
+        let _ = self
+            .events
+            .send(json!({ "event": "cleared", "data": null }));
         Ok(())
     }
 
@@ -214,7 +233,10 @@ impl Node {
 
     /// At most one history compaction a minute, whatever the traffic.
     fn compaction_due(&self) -> bool {
-        let mut last = self.last_compaction.lock().unwrap_or_else(|e| e.into_inner());
+        let mut last = self
+            .last_compaction
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if last.is_some_and(|t: std::time::Instant| t.elapsed() < Duration::from_secs(60)) {
             return false;
         }
@@ -234,36 +256,50 @@ impl Node {
             *r != before
         });
         if changed {
-            let _ = self.events.send(json!({ "event": "status", "data": self.radio_status() }));
+            let _ = self
+                .events
+                .send(json!({ "event": "status", "data": self.radio_status() }));
         }
     }
 
     fn emit_settings(&self) {
-        let s = self.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let s = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         let _ = self.events.send(json!({ "event": "settings", "data": s }));
     }
 
-    pub fn snapshot(&self) -> Value {
+    pub fn snapshot(&self, limit: usize) -> Snapshot {
         let (me, peers, messages) = self.with_mesh(|m, _| {
             let all: Vec<_> = m.messages().cloned().collect();
-            let recent = all[all.len().saturating_sub(SNAPSHOT_MESSAGES)..].to_vec();
+            let recent = all[all.len().saturating_sub(limit)..].to_vec();
             (m.me(), m.peers(), recent)
         });
-        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        json!({
-            "me": me,
-            "peers": peers,
-            "messages": messages,
-            "settings": settings,
-            "radio": self.radio_status(),
-            "version": env!("CARGO_PKG_VERSION"),
-        })
+        let settings = self
+            .settings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        Snapshot {
+            me,
+            peers,
+            messages,
+            settings,
+            radio: self.radio_status(),
+            version: env!("CARGO_PKG_VERSION"),
+        }
     }
 
     pub fn apply(&self, effects: Vec<Effect>) {
         for effect in effects {
             match effect {
-                Effect::Send { packet, target, delay } => {
+                Effect::Send {
+                    packet,
+                    target,
+                    delay,
+                } => {
                     if delay.is_zero() {
                         let _ = self.out.send(Outgoing { packet, target });
                     } else {
@@ -276,13 +312,18 @@ impl Node {
                 }
                 Effect::Event(event) => {
                     if let Event::Message(msg) = &event {
-                        let persist = self.settings.lock().unwrap_or_else(|e| e.into_inner()).persist_history;
+                        let persist = self
+                            .settings
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .persist_history;
                         if persist {
                             match self.store.append_history(msg) {
                                 // Grown past its cap: rewrite it from the
                                 // in-memory log (the last 500 messages).
                                 Ok(true) if self.compaction_due() => {
-                                    let msgs: Vec<_> = self.with_mesh(|m, _| m.messages().cloned().collect());
+                                    let msgs: Vec<_> =
+                                        self.with_mesh(|m, _| m.messages().cloned().collect());
                                     if let Err(e) = self.store.rewrite_history(&msgs) {
                                         tracing::warn!("compacting history: {e:#}");
                                     }

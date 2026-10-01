@@ -1,8 +1,8 @@
 //! On-disk state: identity (keys + nickname), settings, and message history.
 //!
-//! - `$XDG_DATA_HOME/omarchy-bitchat/identity.json` (0600): who we are.
-//! - `$XDG_STATE_HOME/omarchy-bitchat/settings.json`: radio mode, history.
-//! - `$XDG_STATE_HOME/omarchy-bitchat/messages.jsonl`: recent public chat.
+//! - `$XDG_DATA_HOME/bitchat-linux/mesh/identity.json` (0600): who we are.
+//! - `$XDG_STATE_HOME/bitchat-linux/mesh/settings.json`: radio mode, history.
+//! - `$XDG_STATE_HOME/bitchat-linux/mesh/messages.jsonl`: recent public chat.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -47,7 +47,10 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { mode: Mode::Auto, persist_history: true }
+        Settings {
+            mode: Mode::Auto,
+            persist_history: true,
+        }
     }
 }
 
@@ -68,8 +71,14 @@ impl Store {
     /// `BITCHAT_DATA_DIR` / `BITCHAT_STATE_DIR` (set by the systemd unit, so
     /// they always match its sandbox), else the XDG directories.
     pub fn from_env() -> Result<Store> {
-        let explicit = |var: &str| std::env::var_os(var).map(PathBuf::from).filter(|p| p.is_absolute());
-        let home = std::env::var_os("HOME").map(PathBuf::from).context("HOME is not set")?;
+        let explicit = |var: &str| {
+            std::env::var_os(var)
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+        };
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .context("HOME is not set")?;
         let xdg = |var: &str, fallback: &str| {
             std::env::var_os(var)
                 .map(PathBuf::from)
@@ -77,13 +86,19 @@ impl Store {
                 .unwrap_or_else(|| home.join(fallback))
         };
         Ok(Store::at(
-            explicit("BITCHAT_DATA_DIR").unwrap_or_else(|| xdg("XDG_DATA_HOME", ".local/share").join("omarchy-bitchat")),
-            explicit("BITCHAT_STATE_DIR").unwrap_or_else(|| xdg("XDG_STATE_HOME", ".local/state").join("omarchy-bitchat")),
+            explicit("BITCHAT_DATA_DIR")
+                .unwrap_or_else(|| xdg("XDG_DATA_HOME", ".local/share").join("bitchat-linux/mesh")),
+            explicit("BITCHAT_STATE_DIR").unwrap_or_else(|| {
+                xdg("XDG_STATE_HOME", ".local/state").join("bitchat-linux/mesh")
+            }),
         ))
     }
 
     pub fn at(data_dir: PathBuf, state_dir: PathBuf) -> Store {
-        Store { data_dir, state_dir }
+        Store {
+            data_dir,
+            state_dir,
+        }
     }
 
     /// Create the folder if needed. It must be a real folder we own, not a
@@ -105,8 +120,8 @@ impl Store {
         let path = self.data_dir.join("identity.json");
         match read_small(&path, 64 * 1024) {
             Ok(text) => {
-                let file: IdentityFile =
-                    serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+                let file: IdentityFile = serde_json::from_str(&text)
+                    .with_context(|| format!("parsing {}", path.display()))?;
                 let noise = decode_key(&file.noise_secret).context("bad noiseSecret")?;
                 let signing = decode_key(&file.signing_secret).context("bad signingSecret")?;
                 return Ok((Identity::from_secrets(noise, signing), file.nickname));
@@ -115,7 +130,9 @@ impl Store {
             // permission problem, a disk error) must not quietly replace
             // the user's identity with a new one.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(anyhow::Error::from(e).context(format!("reading {}", path.display()))),
+            Err(e) => {
+                return Err(anyhow::Error::from(e).context(format!("reading {}", path.display())));
+            }
         }
         let id = Identity::generate();
         let nickname = format!("anon{}", &id.peer_id().hex()[..4]);
@@ -130,7 +147,10 @@ impl Store {
             signing_secret: bitchat_proto::peer_id::hex(&id.signing_secret_bytes()),
             nickname: nickname.to_owned(),
         };
-        write_atomic(&self.data_dir.join("identity.json"), serde_json::to_string_pretty(&file)?.as_bytes())
+        write_atomic(
+            &self.data_dir.join("identity.json"),
+            serde_json::to_string_pretty(&file)?.as_bytes(),
+        )
     }
 
     pub fn load_settings(&self) -> Settings {
@@ -142,7 +162,10 @@ impl Store {
 
     pub fn save_settings(&self, s: &Settings) -> Result<()> {
         Self::ensure_dir(&self.state_dir)?;
-        write_atomic(&self.state_dir.join("settings.json"), serde_json::to_string_pretty(s)?.as_bytes())
+        write_atomic(
+            &self.state_dir.join("settings.json"),
+            serde_json::to_string_pretty(s)?.as_bytes(),
+        )
     }
 
     fn history_path(&self) -> PathBuf {
@@ -165,7 +188,9 @@ impl Store {
         if skip > 0 {
             lines.next(); // probably a partial line
         }
-        let all: Vec<ChatMessage> = lines.filter_map(|l| serde_json::from_str(&l).ok()).collect();
+        let all: Vec<ChatMessage> = lines
+            .filter_map(|l| serde_json::from_str(&l).ok())
+            .collect();
         let keep = all[all.len().saturating_sub(LOG_MAX)..].to_vec();
         if all.len() > LOG_MAX * 2 || skip > 0 {
             let _ = self.rewrite_history(&keep);
@@ -201,9 +226,14 @@ impl Store {
 
     pub fn save_pins(&self, pins: &[(bitchat_proto::PeerId, [u8; 32])]) -> Result<()> {
         Self::ensure_dir(&self.state_dir)?;
-        let pairs: Vec<(String, String)> =
-            pins.iter().map(|(id, key)| (id.hex(), bitchat_proto::peer_id::hex(key))).collect();
-        write_atomic(&self.state_dir.join("peers.json"), serde_json::to_string(&pairs)?.as_bytes())
+        let pairs: Vec<(String, String)> = pins
+            .iter()
+            .map(|(id, key)| (id.hex(), bitchat_proto::peer_id::hex(key)))
+            .collect();
+        write_atomic(
+            &self.state_dir.join("peers.json"),
+            serde_json::to_string(&pairs)?.as_bytes(),
+        )
     }
 
     /// Rewrite the file with the newest messages that fit in half of
@@ -252,7 +282,10 @@ fn decode_key(hex: &str) -> Option<[u8; 32]> {
 pub const HISTORY_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
 fn open_nofollow(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path)
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
 }
 
 /// Read a small file, refusing symlinks and anything over `max` bytes.
@@ -261,7 +294,10 @@ fn read_small(path: &Path, max: u64) -> std::io::Result<String> {
     let mut text = String::new();
     f.take(max + 1).read_to_string(&mut text)?;
     if text.len() as u64 > max {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "file too large"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "file too large",
+        ));
     }
     Ok(text)
 }
@@ -271,7 +307,10 @@ fn read_small(path: &Path, max: u64) -> std::io::Result<String> {
 /// never leaves half a file and nothing at a guessable name is followed.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = path.parent().context("path has no parent")?;
-    let name = path.file_name().context("path has no file name")?.to_string_lossy();
+    let name = path
+        .file_name()
+        .context("path has no file name")?
+        .to_string_lossy();
     let mut attempt = 0;
     let (tmp, mut f) = loop {
         let tmp = dir.join(format!(".{name}.{:016x}", rand::random::<u64>()));
@@ -284,7 +323,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         {
             Ok(f) => break (tmp, f),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => attempt += 1,
-            Err(e) => return Err(anyhow::Error::from(e).context(format!("writing next to {}", path.display()))),
+            Err(e) => {
+                return Err(
+                    anyhow::Error::from(e).context(format!("writing next to {}", path.display()))
+                );
+            }
         }
     };
     let written = f.write_all(bytes).and_then(|_| f.sync_all());
@@ -318,7 +361,10 @@ mod tests {
         let (b, nick2) = s.load_identity().unwrap();
         assert_eq!(a.peer_id(), b.peer_id());
         assert_eq!(nick, nick2);
-        let mode = fs::metadata(s.data_dir.join("identity.json")).unwrap().permissions().mode();
+        let mode = fs::metadata(s.data_dir.join("identity.json"))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
 
@@ -326,7 +372,10 @@ mod tests {
     fn settings_round_trip_and_defaults() {
         let (_tmp, s) = temp_store();
         assert_eq!(s.load_settings(), Settings::default());
-        let custom = Settings { mode: Mode::Saver, persist_history: false };
+        let custom = Settings {
+            mode: Mode::Saver,
+            persist_history: false,
+        };
         s.save_settings(&custom).unwrap();
         assert_eq!(s.load_settings(), custom);
     }

@@ -24,10 +24,8 @@ use crate::store::Mode;
 const MAX_LINE: usize = 64 * 1024;
 
 pub fn socket_path() -> Result<PathBuf> {
-    // $XDG_RUNTIME_DIR/bitchat/: under systemd that's the unit's
-    // RuntimeDirectory, the only part of /run/user its sandbox can see.
     let dir = std::env::var_os("XDG_RUNTIME_DIR").context("XDG_RUNTIME_DIR is not set")?;
-    Ok(PathBuf::from(dir).join("bitchat").join("bitchat.sock"))
+    Ok(PathBuf::from(dir).join("bitchat-linux").join("mesh.sock"))
 }
 
 #[derive(Deserialize)]
@@ -104,13 +102,24 @@ pub async fn bind(path: &Path) -> Result<Bound> {
     }
     match std::fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_socket() => std::fs::remove_file(path)?,
-        Ok(_) => bail!("{} exists and isn't a socket; not touching it", path.display()),
+        Ok(_) => bail!(
+            "{} exists and isn't a socket; not touching it",
+            path.display()
+        ),
         Err(_) => {}
     }
-    let listener = UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("binding {}", path.display()))?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     let ino = std::fs::symlink_metadata(path)?.ino();
-    Ok(Bound { listener, owner: Owner { _lock: lock, path: path.to_owned(), ino } })
+    Ok(Bound {
+        listener,
+        owner: Owner {
+            _lock: lock,
+            path: path.to_owned(),
+            ino,
+        },
+    })
 }
 
 pub async fn serve(node: Arc<Node>, listener: UnixListener) -> Result<()> {
@@ -139,7 +148,9 @@ async fn handle(node: Arc<Node>, stream: UnixStream) -> Result<()> {
 
     let writer = tokio::spawn(async move {
         while let Some(line) = rx.recv().await {
-            if write.write_all(line.as_bytes()).await.is_err() || write.write_all(b"\n").await.is_err() {
+            if write.write_all(line.as_bytes()).await.is_err()
+                || write.write_all(b"\n").await.is_err()
+            {
                 break;
             }
         }
@@ -150,7 +161,10 @@ async fn handle(node: Arc<Node>, stream: UnixStream) -> Result<()> {
     let mut line = String::new();
     loop {
         line.clear();
-        let n = (&mut reader).take(MAX_LINE as u64 + 1).read_line(&mut line).await?;
+        let n = (&mut reader)
+            .take(MAX_LINE as u64 + 1)
+            .read_line(&mut line)
+            .await?;
         if n == 0 {
             break;
         }
@@ -164,7 +178,9 @@ async fn handle(node: Arc<Node>, stream: UnixStream) -> Result<()> {
         let req: Request = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                let _ = tx.send(json!({ "id": 0, "error": format!("bad request: {e}") }).to_string()).await;
+                let _ = tx
+                    .send(json!({ "id": 0, "error": format!("bad request: {e}") }).to_string())
+                    .await;
                 continue;
             }
         };
@@ -173,8 +189,10 @@ async fn handle(node: Arc<Node>, stream: UnixStream) -> Result<()> {
             // Subscribe to events before taking the snapshot so nothing
             // falls between the two.
             let mut events = node.events();
-            let snapshot = node.snapshot();
-            let _ = tx.send(json!({ "id": req.id, "result": snapshot }).to_string()).await;
+            let snapshot = node.snapshot(crate::node::SNAPSHOT_MESSAGES);
+            let _ = tx
+                .send(json!({ "id": req.id, "result": snapshot }).to_string())
+                .await;
             let tx = tx.clone();
             forwarder = Some(tokio::spawn(async move {
                 loop {
@@ -186,7 +204,9 @@ async fn handle(node: Arc<Node>, stream: UnixStream) -> Result<()> {
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             // Too slow to keep up: tell the client to resync.
-                            let _ = tx.send(json!({ "event": "resync", "data": null }).to_string()).await;
+                            let _ = tx
+                                .send(json!({ "event": "resync", "data": null }).to_string())
+                                .await;
                         }
                         Err(_) => break,
                     }
@@ -218,15 +238,24 @@ fn dispatch(node: &Node, method: &str, params: &Value) -> Result<Value, String> 
             .ok_or_else(|| format!("missing string parameter \"{key}\""))
     };
     match method {
-        "status" | "subscribe" => Ok(node.snapshot()),
+        "status" | "subscribe" => {
+            serde_json::to_value(node.snapshot(crate::node::SNAPSHOT_MESSAGES))
+                .map_err(|e| e.to_string())
+        }
         "send" => node.send_text(str_param("text")?).map(|_| json!(true)),
-        "setNickname" => node.set_nickname(str_param("nickname")?).map(|_| json!(true)),
+        "setNickname" => node
+            .set_nickname(str_param("nickname")?)
+            .map(|_| json!(true)),
         "setMode" => {
-            let mode = Mode::parse(str_param("mode")?).ok_or("mode must be auto, balanced, saver or off")?;
+            let mode = Mode::parse(str_param("mode")?)
+                .ok_or("mode must be auto, balanced, saver or off")?;
             node.set_mode(mode).map(|_| json!(true))
         }
         "setPersistHistory" => {
-            let enabled = params.get("enabled").and_then(Value::as_bool).ok_or("missing boolean \"enabled\"")?;
+            let enabled = params
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or("missing boolean \"enabled\"")?;
             node.set_persist_history(enabled).map(|_| json!(true))
         }
         "clearHistory" => node.clear_history().map(|_| json!(true)),
