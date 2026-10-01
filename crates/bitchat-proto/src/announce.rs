@@ -110,7 +110,12 @@ impl Announcement {
                 TLV_SIGNING_KEY => signing = Some(value.to_vec()),
                 TLV_CAPABILITIES => capabilities = Some(Capabilities::decode(value)),
                 TLV_NEIGHBORS => {
-                    neighbors = value.as_chunks::<8>().0.iter().map(|c| PeerId(*c)).collect();
+                    neighbors = value
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| PeerId(*c))
+                        .collect();
                 }
                 _ => unknown.push((t, value.to_vec())),
             }

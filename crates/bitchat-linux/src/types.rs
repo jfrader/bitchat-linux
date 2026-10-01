@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-pub const APP_NAME: &str = "bitchat-linux";
+pub use bitchatd::APP_NAME;
 pub const HISTORY_LIMIT: usize = 500;
 pub const MAX_TEXT_BYTES: usize = bitchatd::MAX_TEXT_BYTES;
 pub const CHANNEL_CAPACITY: usize = 128;
@@ -31,6 +31,41 @@ pub fn send_failure_notice(room: &Room, text: &str, reason: &str) -> String {
     )
 }
 
+#[derive(Clone, Debug)]
+pub struct FailedSend {
+    pub room: Room,
+    pub text: String,
+    pub reason: String,
+    pub timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Notice {
+    pub room: Option<Room>,
+    pub text: String,
+}
+
+impl Notice {
+    pub fn in_room(room: Room, text: impl Into<String>) -> Self {
+        Self {
+            room: Some(room),
+            text: text.into(),
+        }
+    }
+}
+
+impl From<String> for Notice {
+    fn from(text: String) -> Self {
+        Self { room: None, text }
+    }
+}
+
+impl From<&str> for Notice {
+    fn from(text: &str) -> Self {
+        text.to_owned().into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -50,7 +85,7 @@ pub enum Update {
         detail: String,
         connected: usize,
     },
-    Notice(String),
+    Notice(Notice),
     SendFailed {
         room: Room,
         text: String,

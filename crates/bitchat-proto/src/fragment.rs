@@ -77,7 +77,11 @@ pub fn split(packet: &Packet, max_frame: usize) -> Option<Vec<Packet>> {
     let routed = !packet.route.is_empty();
     let header = if routed { 16 } else { 14 };
     let recipient = if packet.recipient.is_some() { 8 } else { 0 };
-    let route = if routed { 1 + packet.route.len() * 8 } else { 0 };
+    let route = if routed {
+        1 + packet.route.len() * 8
+    } else {
+        0
+    };
     let overhead = header + 8 + recipient + route + HEADER_LEN + 16;
     let chunk = max_frame.checked_sub(overhead)?.min(MAX_FRAGMENT_DATA);
     if chunk == 0 {
@@ -248,7 +252,9 @@ mod tests {
         // Random text so compression can't shrink it under the limit.
         use rand::{Rng, SeedableRng};
         let mut rng = rand::rngs::StdRng::seed_from_u64(len as u64);
-        let text: String = (0..len).map(|_| char::from(rng.gen_range(b'!'..=b'~'))).collect();
+        let text: String = (0..len)
+            .map(|_| char::from(rng.gen_range(b'!'..=b'~')))
+            .collect();
         id.message_packet(&text)
     }
 
@@ -325,7 +331,14 @@ mod tests {
         let mut r = Reassembler::new();
         let mk = |total: u16, index: u16| {
             let mut p = Packet::new(MessageType::Fragment, crate::PeerId([1; 8]), Vec::new());
-            p.payload = FragmentPayload { id: [5; 8], index, total, original_type: 2, data: vec![1] }.encode();
+            p.payload = FragmentPayload {
+                id: [5; 8],
+                index,
+                total,
+                original_type: 2,
+                data: vec![1],
+            }
+            .encode();
             p
         };
         assert!(r.push(&mk(3, 0), 0, 1).is_none());
@@ -340,9 +353,20 @@ mod tests {
         // A new sender ID on every fragment: the quota still holds, since
         // it's keyed on the link.
         let frag = |sender: u8, id: u8, t: u64| {
-            let mut p = Packet::new(MessageType::Fragment, crate::PeerId([sender; 8]), Vec::new());
+            let mut p = Packet::new(
+                MessageType::Fragment,
+                crate::PeerId([sender; 8]),
+                Vec::new(),
+            );
             p.timestamp = t;
-            p.payload = FragmentPayload { id: [id; 8], index: 0, total: 2, original_type: 2, data: vec![1] }.encode();
+            p.payload = FragmentPayload {
+                id: [id; 8],
+                index: 0,
+                total: 2,
+                original_type: 2,
+                data: vec![1],
+            }
+            .encode();
             p
         };
         for i in 0..100u8 {
@@ -359,7 +383,14 @@ mod tests {
         let mut r = Reassembler::new();
         let frag = |id: u8, index: u16, total: u16| {
             let mut p = Packet::new(MessageType::Fragment, crate::PeerId([1; 8]), Vec::new());
-            p.payload = FragmentPayload { id: [id; 8], index, total, original_type: 2, data: vec![1] }.encode();
+            p.payload = FragmentPayload {
+                id: [id; 8],
+                index,
+                total,
+                original_type: 2,
+                data: vec![1],
+            }
+            .encode();
             p
         };
         // A real transfer, 9 of 10 parts in, from link 1.
@@ -377,11 +408,25 @@ mod tests {
     fn rejects_too_many_fragments_and_expires() {
         let mut r = Reassembler::new();
         let mut p = Packet::new(MessageType::Fragment, crate::PeerId([1; 8]), Vec::new());
-        p.payload = FragmentPayload { id: [5; 8], index: 0, total: 257, original_type: 2, data: vec![1] }.encode();
+        p.payload = FragmentPayload {
+            id: [5; 8],
+            index: 0,
+            total: 257,
+            original_type: 2,
+            data: vec![1],
+        }
+        .encode();
         assert!(r.push(&p, 0, 1).is_none());
         assert_eq!(r.active_sets(), 0);
 
-        p.payload = FragmentPayload { id: [6; 8], index: 0, total: 2, original_type: 2, data: vec![1] }.encode();
+        p.payload = FragmentPayload {
+            id: [6; 8],
+            index: 0,
+            total: 2,
+            original_type: 2,
+            data: vec![1],
+        }
+        .encode();
         r.push(&p, 0, 1);
         r.expire(TIMEOUT_MS);
         assert_eq!(r.active_sets(), 1);

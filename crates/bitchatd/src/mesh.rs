@@ -83,7 +83,11 @@ pub enum Target {
 
 #[derive(Debug)]
 pub enum Effect {
-    Send { packet: Packet, target: Target, delay: Duration },
+    Send {
+        packet: Packet,
+        target: Target,
+        delay: Duration,
+    },
     Event(Event),
 }
 
@@ -177,7 +181,12 @@ impl Mesh {
         Mesh::with_pins(me, nickname, history, Vec::new())
     }
 
-    pub fn with_pins(me: Identity, nickname: String, history: Vec<ChatMessage>, pins: Vec<(PeerId, [u8; 32])>) -> Mesh {
+    pub fn with_pins(
+        me: Identity,
+        nickname: String,
+        history: Vec<ChatMessage>,
+        pins: Vec<(PeerId, [u8; 32])>,
+    ) -> Mesh {
         let my_id = me.peer_id();
         let mut mesh = Mesh {
             me,
@@ -270,13 +279,22 @@ impl Mesh {
             return None;
         }
         self.pins_dirty = false;
-        Some(self.pin_order.iter().filter_map(|id| self.pins.get(id).map(|k| (*id, *k))).collect())
+        Some(
+            self.pin_order
+                .iter()
+                .filter_map(|id| self.pins.get(id).map(|k| (*id, *k)))
+                .collect(),
+        )
     }
 
     /// Pin a new peer's key, if the rate limit allows. Least recently seen
     /// pins are evicted first (see [`Mesh::refresh_pin`]).
     fn pin(&mut self, id: PeerId, key: [u8; 32], now: u64) -> bool {
-        while self.pin_times.front().is_some_and(|t| now.saturating_sub(*t) > 60_000) {
+        while self
+            .pin_times
+            .front()
+            .is_some_and(|t| now.saturating_sub(*t) > 60_000)
+        {
             self.pin_times.pop_front();
         }
         if self.pin_times.len() >= PINS_PER_MINUTE {
@@ -340,7 +358,11 @@ impl Mesh {
 
     pub fn on_link_up(&mut self, link: LinkId) -> Vec<Effect> {
         self.links.insert(link);
-        vec![Effect::Send { packet: self.announce(), target: Target::Link(link), delay: LINK_ANNOUNCE_DELAY }]
+        vec![Effect::Send {
+            packet: self.announce(),
+            target: Target::Link(link),
+            delay: LINK_ANNOUNCE_DELAY,
+        }]
     }
 
     pub fn on_link_down(&mut self, link: LinkId, now: u64) -> Vec<Effect> {
@@ -364,7 +386,11 @@ impl Mesh {
         let mut out = Vec::new();
         self.seen.prune(now);
         self.reassembler.expire(now);
-        while self.pending.front().is_some_and(|(_, _, at)| now.saturating_sub(*at) > PENDING_MS) {
+        while self
+            .pending
+            .front()
+            .is_some_and(|(_, _, at)| now.saturating_sub(*at) > PENDING_MS)
+        {
             self.pending.pop_front();
         }
 
@@ -374,7 +400,9 @@ impl Mesh {
                 return true;
             }
             let silent = now.saturating_sub(p.last_seen);
-            let link_lost = p.unlinked_at.is_some_and(|at| now.saturating_sub(at) > DISCONNECT_GRACE_MS);
+            let link_lost = p
+                .unlinked_at
+                .is_some_and(|at| now.saturating_sub(at) > DISCONNECT_GRACE_MS);
             silent <= PEER_STALE_MS && !(link_lost && silent > DISCONNECT_GRACE_MS)
         });
         if self.peers.len() != before {
@@ -391,11 +419,16 @@ impl Mesh {
         self.seen_unverified.prune(now);
 
         if !self.links.is_empty() && now >= self.next_announce {
-            out.push(Effect::Send { packet: self.announce(), target: Target::All, delay: Duration::ZERO });
+            out.push(Effect::Send {
+                packet: self.announce(),
+                target: Target::All,
+                delay: Duration::ZERO,
+            });
             self.next_announce = now + ANNOUNCE_INTERVAL_MS + rng.gen_range(0..ANNOUNCE_JITTER_MS);
         }
 
-        self.sync_announces.retain(|_, p| now.saturating_sub(p.timestamp) <= PEER_STALE_MS);
+        self.sync_announces
+            .retain(|_, p| now.saturating_sub(p.timestamp) <= PEER_STALE_MS);
         // Backfilled packets can be older than ones already stored, so the
         // store isn't time-ordered: prune by age everywhere, not from the front.
         let ids = &mut self.sync_ids;
@@ -408,14 +441,24 @@ impl Mesh {
             }
             keep
         });
-        self.sync_replied.retain(|_, at| now.saturating_sub(*at) <= SYNC_REPLY_COOLDOWN_MS);
-        self.sync_replied_link.retain(|_, at| now.saturating_sub(*at) <= SYNC_REPLY_COOLDOWN_MS);
-        while self.sync_sent.front().is_some_and(|at| now.saturating_sub(*at) > SYNC_BUDGET_WINDOW_MS) {
+        self.sync_replied
+            .retain(|_, at| now.saturating_sub(*at) <= SYNC_REPLY_COOLDOWN_MS);
+        self.sync_replied_link
+            .retain(|_, at| now.saturating_sub(*at) <= SYNC_REPLY_COOLDOWN_MS);
+        while self
+            .sync_sent
+            .front()
+            .is_some_and(|at| now.saturating_sub(*at) > SYNC_BUDGET_WINDOW_MS)
+        {
             self.sync_sent.pop_front();
         }
         if !self.links.is_empty() && now >= self.next_sync {
             if self.next_sync != 0 {
-                out.push(Effect::Send { packet: self.sync_request(now), target: Target::All, delay: Duration::ZERO });
+                out.push(Effect::Send {
+                    packet: self.sync_request(now),
+                    target: Target::All,
+                    delay: Duration::ZERO,
+                });
             }
             self.next_sync = now + SYNC_INTERVAL_MS + rng.gen_range(0..ANNOUNCE_JITTER_MS);
         }
@@ -425,9 +468,14 @@ impl Mesh {
     /// A REQUEST_SYNC listing what we hold, newest first. Neighbor-only
     /// (TTL 0) and signed, as iOS requires.
     fn sync_request(&self, now: u64) -> Packet {
-        let mut known: Vec<&Packet> = self.sync_announces.values().chain(self.sync_msgs.iter()).collect();
+        let mut known: Vec<&Packet> = self
+            .sync_announces
+            .values()
+            .chain(self.sync_msgs.iter())
+            .collect();
         known.sort_by_key(|p| std::cmp::Reverse(p.timestamp));
-        let entries: Vec<([u8; 16], u64)> = known.iter().map(|p| (packet_id(p), p.timestamp)).collect();
+        let entries: Vec<([u8; 16], u64)> =
+            known.iter().map(|p| (packet_id(p), p.timestamp)).collect();
         let req = gsync::build_request(&entries, gsync::DEFAULT_FILTER_BYTES);
         let mut packet = Packet::new(MessageType::RequestSync, self.my_id, req.encode());
         packet.ttl = 0;
@@ -438,7 +486,10 @@ impl Mesh {
 
     fn store_for_sync(&mut self, packet: &Packet) {
         if packet.ptype == MessageType::Announce as u8 {
-            let newer = self.sync_announces.get(&packet.sender).is_none_or(|old| old.timestamp < packet.timestamp);
+            let newer = self
+                .sync_announces
+                .get(&packet.sender)
+                .is_none_or(|old| old.timestamp < packet.timestamp);
             if newer {
                 self.sync_announces.insert(packet.sender, packet.clone());
             }
@@ -471,7 +522,11 @@ impl Mesh {
         if now.abs_diff(packet.timestamp) > SYNC_REQUEST_MAX_AGE_MS {
             return;
         }
-        if self.sync_replied_link.get(&link).is_some_and(|at| now.saturating_sub(*at) < SYNC_REPLY_COOLDOWN_MS) {
+        if self
+            .sync_replied_link
+            .get(&link)
+            .is_some_and(|at| now.saturating_sub(*at) < SYNC_REPLY_COOLDOWN_MS)
+        {
             return;
         }
         let Some(key) = self.peers.get(&packet.sender).map(|p| p.signing_key) else {
@@ -480,7 +535,11 @@ impl Mesh {
         if !identity::verify(packet, &key) {
             return;
         }
-        if self.sync_replied.get(&packet.sender).is_some_and(|at| now.saturating_sub(*at) < SYNC_REPLY_COOLDOWN_MS) {
+        if self
+            .sync_replied
+            .get(&packet.sender)
+            .is_some_and(|at| now.saturating_sub(*at) < SYNC_REPLY_COOLDOWN_MS)
+        {
             return;
         }
         let Some(req) = RequestSync::decode(&packet.payload) else {
@@ -497,12 +556,20 @@ impl Mesh {
 
         let mut missing: Vec<&Packet> = Vec::new();
         if req.wants(gsync::TYPE_ANNOUNCE) {
-            missing.extend(self.sync_announces.values().filter(|p| p.sender != packet.sender));
+            missing.extend(
+                self.sync_announces
+                    .values()
+                    .filter(|p| p.sender != packet.sender),
+            );
         }
         if req.wants(gsync::TYPE_MESSAGE) {
             // Older than the requester's cursor is outside its filter, not
             // missing. Announces are exempt, as on iOS.
-            missing.extend(self.sync_msgs.iter().filter(|p| req.since.is_none_or(|since| p.timestamp >= since)));
+            missing.extend(
+                self.sync_msgs
+                    .iter()
+                    .filter(|p| req.since.is_none_or(|since| p.timestamp >= since)),
+            );
         }
         missing.retain(|p| !filter.might_contain(&packet_id(p)));
         // Announces first so the messages after them verify.
@@ -510,7 +577,9 @@ impl Mesh {
 
         // A global budget too: many links asking at once can't make us
         // flood the radio.
-        let budget = SYNC_BUDGET.saturating_sub(self.sync_sent.len()).min(SYNC_REPLY_MAX);
+        let budget = SYNC_BUDGET
+            .saturating_sub(self.sync_sent.len())
+            .min(SYNC_REPLY_MAX);
         let replies: Vec<Packet> = missing.into_iter().take(budget).cloned().collect();
         for _ in &replies {
             self.sync_sent.push_back(now);
@@ -547,7 +616,11 @@ impl Mesh {
         };
         self.push_log(msg.clone());
         vec![
-            Effect::Send { packet, target: Target::All, delay: Duration::ZERO },
+            Effect::Send {
+                packet,
+                target: Target::All,
+                delay: Duration::ZERO,
+            },
             Effect::Event(Event::Message(msg)),
         ]
     }
@@ -557,7 +630,11 @@ impl Mesh {
         self.nickname = nick;
         let mut out = vec![Effect::Event(Event::Identity(self.me()))];
         if !self.links.is_empty() {
-            out.push(Effect::Send { packet: self.announce(), target: Target::All, delay: Duration::ZERO });
+            out.push(Effect::Send {
+                packet: self.announce(),
+                target: Target::All,
+                delay: Duration::ZERO,
+            });
         }
         Ok(out)
     }
@@ -575,7 +652,13 @@ impl Mesh {
     }
 
     /// Handle one frame received on `link`.
-    pub fn on_frame(&mut self, link: LinkId, frame: &[u8], now: u64, rng: &mut impl Rng) -> Vec<Effect> {
+    pub fn on_frame(
+        &mut self,
+        link: LinkId,
+        frame: &[u8],
+        now: u64,
+        rng: &mut impl Rng,
+    ) -> Vec<Effect> {
         let Some(packet) = Packet::decode(frame) else {
             return Vec::new();
         };
@@ -584,7 +667,14 @@ impl Mesh {
         out
     }
 
-    fn on_packet(&mut self, link: LinkId, packet: Packet, now: u64, rng: &mut impl Rng, out: &mut Vec<Effect>) {
+    fn on_packet(
+        &mut self,
+        link: LinkId,
+        packet: Packet,
+        now: u64,
+        rng: &mut impl Rng,
+        out: &mut Vec<Effect>,
+    ) {
         if packet.sender == self.my_id {
             return;
         }
@@ -685,14 +775,21 @@ impl Mesh {
     }
 
     /// Validate and apply an announce. Returns false to drop it.
-    fn handle_announce(&mut self, link: LinkId, packet: &Packet, now: u64, out: &mut Vec<Effect>) -> bool {
+    fn handle_announce(
+        &mut self,
+        link: LinkId,
+        packet: &Packet,
+        now: u64,
+        out: &mut Vec<Effect>,
+    ) -> bool {
         let Some(ann) = identity::verify_announce(packet) else {
             return false;
         };
         let (Some(noise), Some(signing)) = (ann.noise_key(), ann.signing_key()) else {
             return false;
         };
-        let nickname = sanitize_nickname(&ann.nickname).unwrap_or_else(|| format!("anon{}", &packet.sender.hex()[..4]));
+        let nickname = sanitize_nickname(&ann.nickname)
+            .unwrap_or_else(|| format!("anon{}", &packet.sender.hex()[..4]));
         let direct = packet.ttl == MAX_TTL;
 
         // Trust on first use, across restarts: a peer ID we've met keeps the
@@ -701,7 +798,10 @@ impl Mesh {
         // made below, only for peers that announce directly over a link.
         let pinned = match self.pins.get(&packet.sender) {
             Some(key) if *key != signing => {
-                tracing::warn!("rejected an announce for {} with a different signing key", packet.sender);
+                tracing::warn!(
+                    "rejected an announce for {} with a different signing key",
+                    packet.sender
+                );
                 return false;
             }
             Some(_) => true,
@@ -713,7 +813,10 @@ impl Mesh {
         // Newest announce yet from this peer? Replays of older ones may still
         // refresh it, but don't rename it or bind a link. (Ordering, not wall
         // clock: off-grid phones' clocks drift by minutes.)
-        let newest = self.peers.get(&packet.sender).is_none_or(|p| packet.timestamp >= p.announced_at);
+        let newest = self
+            .peers
+            .get(&packet.sender)
+            .is_none_or(|p| packet.timestamp >= p.announced_at);
 
         let mut changed = false;
         match self.peers.get_mut(&packet.sender) {
@@ -774,7 +877,11 @@ impl Mesh {
             if new_link {
                 changed = true;
                 // A new neighbor: ask what we missed while apart.
-                out.push(Effect::Send { packet: self.sync_request(now), target: Target::Link(link), delay: SYNC_FIRST_DELAY });
+                out.push(Effect::Send {
+                    packet: self.sync_request(now),
+                    target: Target::Link(link),
+                    delay: SYNC_FIRST_DELAY,
+                });
             }
         }
         if changed {
@@ -829,7 +936,14 @@ impl Mesh {
         }
     }
 
-    fn maybe_relay(&mut self, link: LinkId, packet: &Packet, age: u64, rng: &mut impl Rng, out: &mut Vec<Effect>) {
+    fn maybe_relay(
+        &mut self,
+        link: LinkId,
+        packet: &Packet,
+        age: u64,
+        rng: &mut impl Rng,
+        out: &mut Vec<Effect>,
+    ) {
         if age > RELAY_MAX_AGE_MS {
             return;
         }
@@ -841,11 +955,19 @@ impl Mesh {
                     .get(&next)
                     .and_then(|peer| peer.links.iter().copied().find(|l| *l != link));
                 let target = direct.map_or(Target::AllExcept(link), Target::Link);
-                out.push(Effect::Send { packet: p, target, delay: Duration::ZERO });
+                out.push(Effect::Send {
+                    packet: p,
+                    target,
+                    delay: Duration::ZERO,
+                });
             }
             RelayDecision::Flood(p, delay) => {
                 if self.links.len() > 1 || !self.links.contains(&link) {
-                    out.push(Effect::Send { packet: p, target: Target::AllExcept(link), delay });
+                    out.push(Effect::Send {
+                        packet: p,
+                        target: Target::AllExcept(link),
+                        delay,
+                    });
                 }
             }
         }
@@ -858,8 +980,17 @@ impl Mesh {
         self.pending.push_back((packet, link, now));
     }
 
-    fn drain_pending(&mut self, sender: PeerId, now: u64, rng: &mut impl Rng, out: &mut Vec<Effect>) {
-        let (ready, rest): (VecDeque<_>, VecDeque<_>) = self.pending.drain(..).partition(|(p, _, _)| p.sender == sender);
+    fn drain_pending(
+        &mut self,
+        sender: PeerId,
+        now: u64,
+        rng: &mut impl Rng,
+        out: &mut Vec<Effect>,
+    ) {
+        let (ready, rest): (VecDeque<_>, VecDeque<_>) = self
+            .pending
+            .drain(..)
+            .partition(|(p, _, _)| p.sender == sender);
         self.pending = rest;
         for (packet, link, _) in ready {
             self.on_packet(link, packet, now, rng, out);
@@ -878,7 +1009,11 @@ impl Mesh {
         if !self.logged_ids.insert(msg.id.clone()) {
             return false;
         }
-        let pos = self.log.iter().rposition(|m| m.timestamp <= msg.timestamp).map_or(0, |i| i + 1);
+        let pos = self
+            .log
+            .iter()
+            .rposition(|m| m.timestamp <= msg.timestamp)
+            .map_or(0, |i| i + 1);
         self.log.insert(pos, msg);
         while self.log.len() > LOG_MAX {
             if let Some(old) = self.log.pop_front() {
@@ -887,7 +1022,6 @@ impl Mesh {
         }
         true
     }
-
 }
 
 /// Characters that reorder or hide text: bidi overrides and isolates,
@@ -1089,13 +1223,19 @@ mod tests {
         let mut b = node("bob");
         introduce(&mut a, &b, 1);
         // Varied enough that compression can't fit it in one frame.
-        let long: String = (0..400u32).map(|i| format!("{} ", (i * 7919) % 1000)).collect();
+        let long: String = (0..400u32)
+            .map(|i| format!("{} ", (i * 7919) % 1000))
+            .collect();
         let fx = b.send_text(&long, NOW);
         let frags = fragment::split(sends(&fx)[0].0, 185).unwrap();
         assert!(frags.len() > 1);
         let mut shown = Vec::new();
         for f in &frags {
-            shown.extend(messages(&a.on_frame(1, &wire(f), NOW, &mut rng())).into_iter().cloned());
+            shown.extend(
+                messages(&a.on_frame(1, &wire(f), NOW, &mut rng()))
+                    .into_iter()
+                    .cloned(),
+            );
         }
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].text, long.trim());
@@ -1158,7 +1298,10 @@ mod tests {
     }
 
     fn of_type(effects: &[Effect], t: MessageType) -> usize {
-        sends(effects).iter().filter(|(p, _)| p.ptype == t as u8).count()
+        sends(effects)
+            .iter()
+            .filter(|(p, _)| p.ptype == t as u8)
+            .count()
     }
 
     #[test]
@@ -1192,7 +1335,10 @@ mod tests {
         ann.timestamp = NOW;
         b.me.sign(&mut ann);
         let fx = a.on_frame(1, &wire(&ann), NOW, &mut rng());
-        let reqs: Vec<_> = sends(&fx).into_iter().filter(|(p, _)| p.ptype == MessageType::RequestSync as u8).collect();
+        let reqs: Vec<_> = sends(&fx)
+            .into_iter()
+            .filter(|(p, _)| p.ptype == MessageType::RequestSync as u8)
+            .collect();
         assert_eq!(reqs.len(), 1);
         assert_eq!(*reqs[0].1, Target::Link(1));
         assert_eq!(reqs[0].0.ttl, 0);
@@ -1223,12 +1369,25 @@ mod tests {
         bob.on_frame(7, &wire(&a_ann), t, &mut rng());
 
         // Alice's request reaches bob; bob answers on link 7 with RSR set.
-        let request: Vec<&Packet> = sends(&alice_fx).into_iter()
-            .filter(|(p, _)| p.ptype == MessageType::RequestSync as u8).map(|(p, _)| p).collect();
+        let request: Vec<&Packet> = sends(&alice_fx)
+            .into_iter()
+            .filter(|(p, _)| p.ptype == MessageType::RequestSync as u8)
+            .map(|(p, _)| p)
+            .collect();
         let answer = bob.on_frame(7, &wire(request[0]), t, &mut rng());
         let replies = sends(&answer);
-        assert!(replies.iter().all(|(p, tgt)| p.rsr && p.ttl == 0 && **tgt == Target::Link(7)));
-        assert_eq!(replies.iter().filter(|(p, _)| p.ptype == MessageType::Message as u8).count(), 1);
+        assert!(
+            replies
+                .iter()
+                .all(|(p, tgt)| p.rsr && p.ttl == 0 && **tgt == Target::Link(7))
+        );
+        assert_eq!(
+            replies
+                .iter()
+                .filter(|(p, _)| p.ptype == MessageType::Message as u8)
+                .count(),
+            1
+        );
 
         // Delivered to alice, the message shows up (carol's announce came too).
         let shown = deliver(&answer, &mut alice, 9, t);
@@ -1242,7 +1401,13 @@ mod tests {
         assert!(sends(&bob.on_frame(7, &wire(request[0]), t + 1, &mut rng())).is_empty());
         let again = alice.sync_request(t + 20_000);
         let answer2 = bob.on_frame(7, &wire(&again), t + 20_000, &mut rng());
-        assert_eq!(sends(&answer2).iter().filter(|(p, _)| p.ptype == MessageType::Message as u8).count(), 0);
+        assert_eq!(
+            sends(&answer2)
+                .iter()
+                .filter(|(p, _)| p.ptype == MessageType::Message as u8)
+                .count(),
+            0
+        );
     }
 
     /// Bob holds `n` messages from carol at NOW - n..NOW; alice is linked
@@ -1274,7 +1439,10 @@ mod tests {
         req.payload = r.encode();
         alice.me.sign(&mut req);
         let answer = bob.on_frame(7, &wire(&req), NOW, &mut rng());
-        let msgs: Vec<_> = sends(&answer).into_iter().filter(|(p, _)| p.ptype == MessageType::Message as u8).collect();
+        let msgs: Vec<_> = sends(&answer)
+            .into_iter()
+            .filter(|(p, _)| p.ptype == MessageType::Message as u8)
+            .collect();
         assert_eq!(msgs.len(), 2);
         assert!(msgs.iter().all(|(p, _)| p.timestamp >= NOW - 2));
     }
@@ -1433,7 +1601,10 @@ mod tests {
         assert_eq!(a.peers().len(), PEERS_MAX);
         // One peers event per tick, however many announces arrived.
         let fx = a.tick(NOW + 1_000, &mut rng());
-        let events = fx.iter().filter(|e| matches!(e, Effect::Event(Event::Peers(_)))).count();
+        let events = fx
+            .iter()
+            .filter(|e| matches!(e, Effect::Event(Event::Peers(_))))
+            .count();
         assert_eq!(events, 1);
     }
 
@@ -1514,7 +1685,9 @@ mod tests {
         let mallory = node("mallory");
         bob.on_link_up(7);
         let req = mallory.sync_request(bitchat_proto::now_ms());
-        assert!(sends(&bob.on_frame(7, &wire(&req), bitchat_proto::now_ms(), &mut rng())).is_empty());
+        assert!(
+            sends(&bob.on_frame(7, &wire(&req), bitchat_proto::now_ms(), &mut rng())).is_empty()
+        );
     }
 
     #[test]
@@ -1538,7 +1711,10 @@ mod tests {
     fn nickname_rules() {
         assert_eq!(sanitize_nickname("  raven  ").as_deref(), Some("raven"));
         assert_eq!(sanitize_nickname("a\u{7}b").as_deref(), Some("ab"));
-        assert_eq!(sanitize_nickname("abcdefghijklmnopq").as_deref(), Some("abcdefghijklmno"));
+        assert_eq!(
+            sanitize_nickname("abcdefghijklmnopq").as_deref(),
+            Some("abcdefghijklmno")
+        );
         assert_eq!(sanitize_nickname("   "), None);
     }
 

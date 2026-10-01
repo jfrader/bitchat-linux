@@ -4,11 +4,12 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use tui_input::{Input, InputRequest, backend::crossterm::EventHandler};
 
 use crate::types::{
-    Action, HISTORY_LIMIT, MAX_TEXT_BYTES, Message, Room, Update, parse_geohash,
-    send_failure_notice,
+    Action, FailedSend, HISTORY_LIMIT, MAX_TEXT_BYTES, Message, Notice, Room, Update,
+    parse_geohash, send_failure_notice,
 };
 
 const MAX_SAVED_DRAFTS: usize = 16;
+const SCROLL_LINES: usize = 10;
 
 pub struct App {
     pub nickname: String,
@@ -19,12 +20,13 @@ pub struct App {
     pub internet_connected: usize,
     pub peers: Vec<bitchatd::PeerView>,
     pub input: Input,
-    pub notice: Option<String>,
+    pub notice: Option<Notice>,
     pub help: bool,
     /// Number of lines above the bottom of the current conversation.
     pub scroll: usize,
     mesh_messages: VecDeque<Message>,
     internet_messages: VecDeque<Message>,
+    failed_sends: VecDeque<FailedSend>,
     drafts: HashMap<Room, Input>,
     last_mesh_state: Option<bitchatd::RadioState>,
 }
@@ -53,6 +55,7 @@ impl App {
             scroll: 0,
             mesh_messages: VecDeque::new(),
             internet_messages: VecDeque::new(),
+            failed_sends: VecDeque::new(),
             drafts: HashMap::new(),
             last_mesh_state: None,
         }
@@ -134,7 +137,22 @@ impl App {
                         self.drafts.insert(room.clone(), Input::new(restored));
                     }
                 }
-                self.notice = Some(send_failure_notice(&room, &text, &reason));
+                self.notice = Some(Notice::in_room(
+                    room.clone(),
+                    send_failure_notice(&room, &text, &reason),
+                ));
+                self.failed_sends.push_back(FailedSend {
+                    room,
+                    text,
+                    reason,
+                    timestamp_ms: chrono::Utc::now()
+                        .timestamp_millis()
+                        .try_into()
+                        .unwrap_or_default(),
+                });
+                if self.failed_sends.len() > HISTORY_LIMIT {
+                    self.failed_sends.pop_front();
+                }
             }
         }
     }
@@ -196,6 +214,19 @@ impl App {
         }
     }
 
+    pub fn failed_sends(&self) -> impl Iterator<Item = &FailedSend> {
+        self.failed_sends
+            .iter()
+            .filter(|send| send.room == self.room)
+    }
+
+    pub fn notice_text(&self) -> Option<&str> {
+        self.notice.as_ref().and_then(|notice| {
+            (notice.room.as_ref().is_none_or(|room| room == &self.room))
+                .then_some(notice.text.as_str())
+        })
+    }
+
     pub fn handle_event(&mut self, event: Event) -> Option<Action> {
         if let Event::Paste(text) = &event {
             if !self.help {
@@ -230,8 +261,10 @@ impl App {
                 };
                 self.switch_room(room);
             }
-            KeyCode::PageUp if !self.help => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::PageDown if !self.help => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::PageUp if !self.help => self.scroll = self.scroll.saturating_add(SCROLL_LINES),
+            KeyCode::PageDown if !self.help => {
+                self.scroll = self.scroll.saturating_sub(SCROLL_LINES)
+            }
             KeyCode::Enter if !self.help => return self.submit(),
             _ if !self.help => {
                 if let KeyCode::Char(character) = key.code
@@ -292,7 +325,7 @@ impl App {
             ("/join", Some(hash), true) => match parse_geohash(hash) {
                 Ok(hash) => Some(Action::Join(hash)),
                 Err(error) => {
-                    self.notice = Some(error.to_string());
+                    self.notice = Some(error.to_string().into());
                     None
                 }
             },
@@ -319,6 +352,14 @@ impl App {
                 match self.room {
                     Room::Mesh => self.mesh_messages.clear(),
                     Room::Internet(_) => self.internet_messages.clear(),
+                }
+                self.failed_sends.retain(|send| send.room != self.room);
+                if self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|notice| notice.room.as_ref() == Some(&self.room))
+                {
+                    self.notice = None;
                 }
                 self.scroll = 0;
                 Some(Action::Clear(self.room.clone()))
@@ -368,10 +409,7 @@ mod tests {
     fn commands_and_dm_safety() {
         let mut app = App::new("me".into(), None);
         assert_eq!(submit(&mut app, "/dm alice secret"), None);
-        assert_eq!(
-            app.notice.as_deref(),
-            Some("Encrypted DMs are not implemented")
-        );
+        assert_eq!(app.notice_text(), Some("Encrypted DMs are not implemented"));
         assert_eq!(
             submit(&mut app, "//dm secret"),
             Some(Action::Send {
@@ -505,7 +543,7 @@ mod tests {
             reason: "offline".into(),
         });
         assert_eq!(app.input.value(), "new draft");
-        let notice = app.notice.as_deref().unwrap();
+        let notice = app.notice_text().unwrap();
         assert!(
             notice.contains("#dr5rs")
                 && notice.contains("older text")
@@ -513,15 +551,18 @@ mod tests {
         );
         app.handle_event(key(KeyCode::Esc));
         app.handle_event(key(KeyCode::Tab));
+        assert!(app.notice_text().is_none());
         app.apply(Update::SendFailed {
             room: Room::Internet("dr5rs".into()),
             text: "lost text".into(),
             reason: "timeout".into(),
         });
         assert_eq!(app.input.value(), "");
-        assert!(app.notice.as_deref().unwrap().contains("lost text"));
+        assert!(app.notice_text().is_none());
+        assert_eq!(app.failed_sends().count(), 0);
         app.handle_event(key(KeyCode::Tab));
         assert_eq!(app.input.value(), "lost text");
+        assert!(app.notice_text().unwrap().contains("lost text"));
     }
 
     #[test]
@@ -594,10 +635,7 @@ mod tests {
             })
         );
         assert_eq!(submit(&mut app, "/msg alice private"), None);
-        assert_eq!(
-            app.notice.as_deref(),
-            Some("Encrypted DMs are not implemented")
-        );
+        assert_eq!(app.notice_text(), Some("Encrypted DMs are not implemented"));
     }
 
     #[test]
@@ -623,7 +661,7 @@ mod tests {
         app.join_channel("new".into());
         assert_eq!(app.input.value(), "latest unsent");
         assert_eq!(app.geohash.as_deref(), Some("u15"));
-        assert!(app.notice.as_deref().unwrap().contains("Draft limit"));
+        assert!(app.notice_text().unwrap().contains("Draft limit"));
         // A switch to an already saved room frees its slot first.
         app.join_channel("u0".into());
         assert_eq!(app.input.value(), "unsent 1");
@@ -640,17 +678,21 @@ mod tests {
             reason: "offline".into(),
         });
         assert_eq!(app.input.value(), "");
+        assert!(app.notice_text().is_none());
         app.handle_event(key(KeyCode::Tab));
         assert_eq!(app.input.value(), "retry");
+        assert!(app.notice_text().unwrap().contains("retry"));
         app.handle_event(key(KeyCode::Tab));
         app.apply(Update::SendFailed {
             room: Room::Internet("dr5rs".into()),
             text: "older".into(),
             reason: "offline".into(),
         });
+        assert!(app.notice_text().is_none());
         app.handle_event(key(KeyCode::Tab));
         assert_eq!(app.input.value(), "retry");
-        assert!(app.notice.as_deref().unwrap().contains("older"));
+        assert!(app.notice_text().unwrap().contains("older"));
+        assert_eq!(app.failed_sends().count(), 2);
     }
 
     #[test]
@@ -701,8 +743,51 @@ mod tests {
             reason: "disk full".into(),
         });
         app.apply_mesh(snapshot);
-        assert!(app.notice.as_deref().unwrap().contains("disk full"));
+        assert!(app.notice_text().unwrap().contains("disk full"));
         app.handle_event(key(KeyCode::Char('\u{202e}')));
         assert_eq!(app.input.value(), "unsent");
+    }
+
+    #[test]
+    fn failed_send_history_is_bounded_and_cleared_per_room() {
+        let mut app = App::new("me".into(), Some("dr5rs".into()));
+        for i in 0..HISTORY_LIMIT + 2 {
+            app.apply(Update::SendFailed {
+                room: app.room.clone(),
+                text: format!("unsent {i}"),
+                reason: "offline".into(),
+            });
+        }
+        assert_eq!(app.failed_sends.len(), HISTORY_LIMIT);
+        assert_eq!(app.failed_sends.front().unwrap().text, "unsent 2");
+        app.handle_event(key(KeyCode::Tab));
+        app.apply(Update::SendFailed {
+            room: Room::Mesh,
+            text: "mesh unsent".into(),
+            reason: "unavailable".into(),
+        });
+        assert_eq!(app.failed_sends().count(), 1);
+        submit(&mut app, "/clear");
+        assert_eq!(app.failed_sends().count(), 0);
+        app.handle_event(key(KeyCode::Tab));
+        assert_eq!(app.failed_sends().count(), HISTORY_LIMIT - 1);
+    }
+
+    #[test]
+    fn clearing_a_room_removes_its_notice_but_keeps_global_notices() {
+        let mut app = App::new("me".into(), None);
+        app.apply(Update::SendFailed {
+            room: Room::Mesh,
+            text: "unsent".into(),
+            reason: "offline".into(),
+        });
+        assert!(app.notice_text().unwrap().contains("unsent"));
+        submit(&mut app, "/clear");
+        assert!(app.notice_text().is_none());
+        assert_eq!(app.failed_sends().count(), 0);
+
+        app.apply(Update::Notice("Bluetooth unavailable".into()));
+        submit(&mut app, "/clear");
+        assert_eq!(app.notice_text(), Some("Bluetooth unavailable"));
     }
 }

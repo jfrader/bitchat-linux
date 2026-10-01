@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use crate::types::{APP_NAME, parse_geohash};
+use crate::types::parse_geohash;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -66,35 +66,25 @@ pub(crate) fn private_directory(path: &std::path::Path) -> Result<()> {
 
 impl Config {
     pub fn paths(&self) -> Result<Paths> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .context("HOME is not set")?;
-        let xdg = |name: &str, fallback: &str| {
-            std::env::var_os(name)
-                .map(PathBuf::from)
-                .filter(|path| path.is_absolute())
-                .unwrap_or_else(|| home.join(fallback))
-                .join(APP_NAME)
-        };
-        let absolute = |path: PathBuf| -> Result<PathBuf> {
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Ok(std::env::current_dir()?.join(path))
-            }
-        };
         Ok(Paths {
-            data: absolute(
-                self.data_dir
-                    .clone()
-                    .unwrap_or_else(|| xdg("XDG_DATA_HOME", ".local/share")),
-            )?,
-            state: absolute(
-                self.state_dir
-                    .clone()
-                    .unwrap_or_else(|| xdg("XDG_STATE_HOME", ".local/state")),
-            )?,
+            data: resolve_path(self.data_dir.clone(), bitchatd::app_data_dir)?,
+            state: resolve_path(self.state_dir.clone(), bitchatd::app_state_dir)?,
         })
+    }
+}
+
+fn resolve_path(
+    path: Option<PathBuf>,
+    default: impl FnOnce() -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    let path = match path {
+        Some(path) => path,
+        None => default()?,
+    };
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(std::env::current_dir()?.join(path))
     }
 }
 
@@ -116,6 +106,7 @@ fn relay(input: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::APP_NAME;
     use std::fs;
     use std::os::unix::fs::{PermissionsExt, symlink};
 
@@ -131,6 +122,23 @@ mod tests {
         assert!(Config::try_parse_from([APP_NAME, "--geohash", "invalid"]).is_err());
         assert!(Config::try_parse_from([APP_NAME, "--relay", "https://example.com"]).is_err());
         assert!(Config::try_parse_from([APP_NAME, "--relay", "ws://127.0.0.1:8080"]).is_ok());
+    }
+
+    #[test]
+    fn explicit_paths_do_not_require_environment_defaults() {
+        let absolute = PathBuf::from("/tmp/bitchat-test-data");
+        assert_eq!(
+            resolve_path(Some(absolute.clone()), || panic!("must not consult HOME")).unwrap(),
+            absolute,
+        );
+        assert_eq!(
+            resolve_path(Some("relative".into()), || panic!("must not consult HOME")).unwrap(),
+            std::env::current_dir().unwrap().join("relative"),
+        );
+        assert_eq!(
+            resolve_path(None, || Ok(absolute.clone())).unwrap(),
+            absolute,
+        );
     }
 
     #[test]

@@ -17,7 +17,7 @@ use tokio::sync::{broadcast, mpsc};
 use app::App;
 use config::Config;
 use internet::{Command, InternetConfig};
-use types::{Action, CHANNEL_CAPACITY, Room, Update, send_failure_notice};
+use types::{Action, CHANNEL_CAPACITY, Notice, Room, Update, send_failure_notice};
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
@@ -56,13 +56,13 @@ async fn main() -> Result<()> {
                 if let Some(nickname) = &config.nickname
                     && let Err(error) = mesh.set_nickname(nickname)
                 {
-                    app.apply(Update::Notice(error));
+                    app.apply(Update::Notice(error.into()));
                 }
                 Some(mesh)
             }
             Err(error) => {
                 app.mesh_status = "unavailable".into();
-                app.apply(Update::Notice(format!("Bluetooth: {error:#}")));
+                app.apply(Update::Notice(format!("Bluetooth: {error:#}").into()));
                 None
             }
         }
@@ -241,13 +241,27 @@ fn execute(
                     text,
                     reason,
                 }),
-                Ok(()) => {
+                Ok(outcome) => {
                     if let Some(mesh) = mesh {
                         let snapshot = mesh.snapshot();
-                        if snapshot.radio.links == 0 {
-                            app.apply(Update::Notice("Saved locally · no connected peers".into()));
-                        }
+                        let no_peers = snapshot.radio.links == 0;
+                        let persistent = snapshot.settings.persist_history;
                         app.apply_mesh(snapshot);
+                        if let Some(error) = outcome.history_error {
+                            app.apply(Update::Notice(Notice::in_room(
+                                Room::Mesh,
+                                format!("Mesh history error: {error}"),
+                            )));
+                        } else if no_peers {
+                            app.apply(Update::Notice(Notice::in_room(
+                                Room::Mesh,
+                                if persistent {
+                                    "Saved locally · no connected peers"
+                                } else {
+                                    "Kept in memory · no connected peers"
+                                },
+                            )));
+                        }
                     }
                 }
             }
@@ -275,14 +289,14 @@ fn execute(
                     permit.send(Command::Join(geohash));
                 }
             }
-            Err(error) => app.apply(Update::Notice(format!("Internet: {error}"))),
+            Err(error) => app.apply(Update::Notice(format!("Internet: {error}").into())),
         },
         Action::Nickname(nickname) => {
             if let Some(nickname) = bitchatd::sanitize_nickname(&nickname) {
                 let result = mesh.map_or(Ok(()), |mesh| mesh.set_nickname(&nickname));
                 match result {
                     Ok(()) => app.nickname = nickname,
-                    Err(error) => app.apply(Update::Notice(error)),
+                    Err(error) => app.apply(Update::Notice(error.into())),
                 }
             } else {
                 app.apply(Update::Notice(
@@ -293,7 +307,7 @@ fn execute(
         Action::Radio(mode) => match mesh {
             Some(mesh) => {
                 if let Err(error) = mesh.set_mode(mode) {
-                    app.apply(Update::Notice(error));
+                    app.apply(Update::Notice(error.into()));
                 }
                 app.apply_mesh(mesh.snapshot());
             }
@@ -303,7 +317,7 @@ fn execute(
             if let Some(mesh) = mesh
                 && let Err(error) = mesh.clear_history()
             {
-                app.apply(Update::Notice(error));
+                app.apply(Update::Notice(error.into()));
             }
         }
         Action::Clear(Room::Internet(_)) => {}
@@ -349,12 +363,7 @@ mod tests {
             &commands,
         );
         assert_eq!(app.input.value(), "unsent");
-        assert!(
-            app.notice
-                .as_deref()
-                .unwrap()
-                .contains("Bluetooth unavailable")
-        );
+        assert!(app.notice_text().unwrap().contains("Bluetooth unavailable"));
     }
 
     #[test]

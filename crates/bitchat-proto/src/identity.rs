@@ -83,7 +83,11 @@ impl Identity {
     /// A signed public chat message. Android addresses these to the
     /// broadcast ID; iOS omits the recipient. Both accept either.
     pub fn message_packet(&self, text: &str) -> Packet {
-        let mut packet = Packet::new(MessageType::Message, self.peer_id(), text.as_bytes().to_vec());
+        let mut packet = Packet::new(
+            MessageType::Message,
+            self.peer_id(),
+            text.as_bytes().to_vec(),
+        );
         packet.recipient = Some(PeerId::BROADCAST);
         self.sign(&mut packet);
         packet
@@ -146,7 +150,8 @@ mod tests {
     #[test]
     fn relayed_ttl_still_verifies() {
         let id = Identity::generate();
-        let mut packet = Packet::decode(&id.message_packet("hello").encode_for_ble().unwrap()).unwrap();
+        let mut packet =
+            Packet::decode(&id.message_packet("hello").encode_for_ble().unwrap()).unwrap();
         packet.ttl = 3;
         assert!(verify(&packet, &id.signing_public()));
     }

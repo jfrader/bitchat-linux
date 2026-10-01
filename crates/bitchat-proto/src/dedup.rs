@@ -43,7 +43,11 @@ impl SeenSet {
     }
 
     pub fn with_capacity(cap: usize) -> SeenSet {
-        SeenSet { seen: HashMap::new(), order: VecDeque::new(), cap }
+        SeenSet {
+            seen: HashMap::new(),
+            order: VecDeque::new(),
+            cap,
+        }
     }
 
     pub fn contains(&self, id: &[u8; 16]) -> bool {

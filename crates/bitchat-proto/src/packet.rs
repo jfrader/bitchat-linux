@@ -94,7 +94,11 @@ pub struct WirePayload {
 
 impl WirePayload {
     pub fn new(bytes: Vec<u8>, compressed: bool, payload: &[u8]) -> WirePayload {
-        WirePayload { bytes, compressed, for_payload: payload_hash(payload) }
+        WirePayload {
+            bytes,
+            compressed,
+            for_payload: payload_hash(payload),
+        }
     }
 }
 
@@ -193,20 +197,29 @@ impl Packet {
             }
             _ => {
                 if compression::should_compress(&self.payload)
-                    && let Some(c) = compression::compress(&self.payload) {
-                        compressed_buf = c;
-                        body = &compressed_buf;
-                        compressed = true;
-                    }
+                    && let Some(c) = compression::compress(&self.payload)
+                {
+                    compressed_buf = c;
+                    body = &compressed_buf;
+                    compressed = true;
+                }
             }
         }
 
-        let size_field = if compressed { if v2 { 4 } else { 2 } } else { 0 };
+        let size_field = if compressed {
+            if v2 { 4 } else { 2 }
+        } else {
+            0
+        };
         let payload_len = body.len() + size_field;
         if !v2 && (payload_len > 0xFFFF || (compressed && self.payload.len() > 0xFFFF)) {
             return Err(EncodeError::V1Overflow(payload_len));
         }
-        let route: &[PeerId] = if v2 { &self.route[..self.route.len().min(255)] } else { &[] };
+        let route: &[PeerId] = if v2 {
+            &self.route[..self.route.len().min(255)]
+        } else {
+            &[]
+        };
 
         let mut flags = 0u8;
         if self.recipient.is_some() {
@@ -295,16 +308,28 @@ impl Packet {
         let v2 = version == 2;
         let flag_bits = *data.get(11)?;
         let (payload_len, header) = if v2 {
-            (u32::from_be_bytes(data.get(12..16)?.try_into().ok()?) as usize, HEADER_V2)
+            (
+                u32::from_be_bytes(data.get(12..16)?.try_into().ok()?) as usize,
+                HEADER_V2,
+            )
         } else {
-            (u16::from_be_bytes(data.get(12..14)?.try_into().ok()?) as usize, HEADER_V1)
+            (
+                u16::from_be_bytes(data.get(12..14)?.try_into().ok()?) as usize,
+                HEADER_V1,
+            )
         };
         let mut len = header + ID_LEN + payload_len;
         if flag_bits & flags::HAS_RECIPIENT != 0 {
             len += ID_LEN;
         }
         if v2 && flag_bits & flags::HAS_ROUTE != 0 {
-            let count_at = header + ID_LEN + if flag_bits & flags::HAS_RECIPIENT != 0 { ID_LEN } else { 0 };
+            let count_at = header
+                + ID_LEN
+                + if flag_bits & flags::HAS_RECIPIENT != 0 {
+                    ID_LEN
+                } else {
+                    0
+                };
             len += 1 + *data.get(count_at)? as usize * ID_LEN;
         }
         if flag_bits & flags::HAS_SIGNATURE != 0 {
@@ -375,7 +400,11 @@ fn decode_core(raw: &[u8]) -> Option<Packet> {
     let is_compressed = flag_bits & flags::IS_COMPRESSED != 0;
     let has_route = v2 && flag_bits & flags::HAS_ROUTE != 0;
     let rsr = flag_bits & flags::IS_RSR != 0;
-    let payload_len = if v2 { r.u32()? as usize } else { r.u16()? as usize };
+    let payload_len = if v2 {
+        r.u32()? as usize
+    } else {
+        r.u16()? as usize
+    };
     let limit = max_payload_for(ptype);
     if payload_len > crate::MAX_PAYLOAD_LENGTH || payload_len > limit + 4 {
         return None;
@@ -396,7 +425,11 @@ fn decode_core(raw: &[u8]) -> Option<Packet> {
         if payload_len <= size_field {
             return None;
         }
-        let original = if v2 { r.u32()? as usize } else { r.u16()? as usize };
+        let original = if v2 {
+            r.u32()? as usize
+        } else {
+            r.u16()? as usize
+        };
         if original == 0 || original > limit {
             return None;
         }
@@ -494,7 +527,10 @@ mod tests {
         // 4-byte length excludes the route.
         assert_eq!(&bytes[12..16], &[0, 0, 0, 2]);
         assert_eq!(bytes[32], 1);
-        assert_eq!(&bytes[33..41], &PeerId::from_hex("1234567890abcdef").unwrap().0);
+        assert_eq!(
+            &bytes[33..41],
+            &PeerId::from_hex("1234567890abcdef").unwrap().0
+        );
         let back = Packet::decode(&bytes).unwrap();
         assert_eq!(back.route, p.route);
         assert_eq!(back.payload, b"hi");
@@ -548,7 +584,10 @@ mod tests {
         p.version = 2;
         p.route = vec![PeerId([3; 8]), PeerId([4; 8])];
         let bytes = p.encode(true).unwrap();
-        assert_eq!(Packet::frame_len(&bytes), Some(padding::unpad(&bytes).len()));
+        assert_eq!(
+            Packet::frame_len(&bytes),
+            Some(padding::unpad(&bytes).len())
+        );
     }
 
     #[test]
@@ -593,7 +632,10 @@ mod tests {
         assert!(Packet::decode(&bytes).unwrap().rsr);
         let mut plain = p.clone();
         plain.rsr = false;
-        assert_eq!(p.signing_preimage().unwrap(), plain.signing_preimage().unwrap());
+        assert_eq!(
+            p.signing_preimage().unwrap(),
+            plain.signing_preimage().unwrap()
+        );
     }
 
     #[test]
@@ -613,7 +655,9 @@ mod tests {
     fn v1_overflow_is_an_error() {
         let mut p = base();
         // High-entropy so it will not compress below the limit.
-        p.payload = (0..70_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        p.payload = (0..70_000u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+            .collect();
         assert!(matches!(p.encode(false), Err(EncodeError::V1Overflow(_))));
         // Big enough to need v2, so a type that may be big (files).
         p.ptype = MessageType::FileTransfer as u8;

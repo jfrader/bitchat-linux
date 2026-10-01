@@ -56,7 +56,11 @@ fn on_battery_in(dir: &Path) -> bool {
             continue;
         }
         saw_mains = true;
-        if std::fs::read_to_string(path.join("online")).unwrap_or_default().trim() == "1" {
+        if std::fs::read_to_string(path.join("online"))
+            .unwrap_or_default()
+            .trim()
+            == "1"
+        {
             return false;
         }
     }

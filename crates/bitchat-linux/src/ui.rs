@@ -9,8 +9,10 @@ use ratatui::{
 
 use crate::{
     app::App,
-    types::{APP_NAME, Room},
+    types::{APP_NAME, FailedSend, Message, Room},
 };
+
+const ID_SUFFIX_LENGTH: usize = 6;
 
 const HELP: &[&str] = &[
     "Public chat (unencrypted)",
@@ -33,6 +35,13 @@ const HELP: &[&str] = &[
 
 fn label(input: &str) -> String {
     bitchatd::clean_message(input).replace(['\n', '\t'], " ")
+}
+
+fn short_id(input: &str) -> String {
+    let id = label(input);
+    id.chars()
+        .skip(id.chars().count().saturating_sub(ID_SUFFIX_LENGTH))
+        .collect()
 }
 
 fn timestamp(ms: u64) -> String {
@@ -70,6 +79,64 @@ fn conversation<'a>(
     Paragraph::new(lines)
         .wrap(wrap)
         .scroll(((start - removed_rows).min(u16::MAX as usize) as u16, 0))
+}
+
+fn message_lines(message: &Message) -> Vec<Line<'static>> {
+    let name =
+        bitchatd::sanitize_nickname(&message.nickname).unwrap_or_else(|| label(&message.nickname));
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            timestamp(message.timestamp_ms),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!(" {name} · {}", short_id(&message.author)),
+            Style::default()
+                .fg(if message.mine {
+                    Color::Cyan
+                } else {
+                    Color::Yellow
+                })
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    lines.extend(
+        bitchatd::clean_message(&message.text)
+            .split('\n')
+            .map(|line| Line::from(format!("  {line}"))),
+    );
+    lines
+}
+
+fn failed_send_lines(send: &FailedSend) -> Vec<Line<'static>> {
+    let mut lines = vec![Line::styled(
+        format!(
+            "{} Not sent · {}",
+            timestamp(send.timestamp_ms),
+            label(&send.reason)
+        ),
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+    )];
+    lines.extend(
+        bitchatd::clean_message(&send.text)
+            .split('\n')
+            .map(|line| Line::from(format!("  {line}"))),
+    );
+    lines
+}
+
+fn chat_lines(app: &App) -> Vec<Line<'static>> {
+    let mut entries: Vec<_> = app
+        .messages()
+        .iter()
+        .map(|message| (message.timestamp_ms, message_lines(message)))
+        .chain(
+            app.failed_sends()
+                .map(|send| (send.timestamp_ms, failed_send_lines(send))),
+        )
+        .collect();
+    entries.sort_by_key(|(timestamp, _)| *timestamp);
+    entries.into_iter().flat_map(|(_, lines)| lines).collect()
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -127,16 +194,11 @@ pub fn render(frame: &mut Frame, app: &App) {
             lines.push(Line::from("No peers"));
         }
         for peer in &app.peers {
-            let id = label(&peer.id);
-            let suffix: String = id
-                .chars()
-                .rev()
-                .take(6)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            lines.push(Line::from(format!("{} · {suffix}", label(&peer.nickname))));
+            lines.push(Line::from(format!(
+                "{} · {}",
+                label(&peer.nickname),
+                short_id(&peer.id)
+            )));
         }
         frame.render_widget(
             Paragraph::new(lines).block(Block::default().borders(Borders::RIGHT)),
@@ -146,41 +208,13 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     let chat_area = columns[1];
     if chat_area.width > 0 && chat_area.height > 0 {
-        let mut lines = Vec::new();
-        for message in app.messages() {
-            let author = label(&message.author);
-            let suffix: String = author
-                .chars()
-                .rev()
-                .take(6)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect();
-            let name = bitchatd::sanitize_nickname(&message.nickname)
-                .unwrap_or_else(|| label(&message.nickname));
-            lines.push(Line::from(vec![
-                Span::styled(
-                    timestamp(message.timestamp_ms),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!(" {name} · {suffix}"),
-                    Style::default()
-                        .fg(if message.mine {
-                            Color::Cyan
-                        } else {
-                            Color::Yellow
-                        })
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            for line in bitchatd::clean_message(&message.text).split('\n') {
-                lines.push(Line::from(format!("  {line}")));
-            }
-        }
         frame.render_widget(
-            conversation(lines, chat_area.width, chat_area.height, app.scroll),
+            conversation(
+                chat_lines(app),
+                chat_area.width,
+                chat_area.height,
+                app.scroll,
+            ),
             chat_area,
         );
     }
@@ -212,7 +246,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         ));
     }
 
-    let footer = if let Some(notice) = &app.notice {
+    let footer = if let Some(notice) = app.notice_text() {
         format!("{}  ·  F1 help  Tab rooms  Ctrl-C quit", label(notice))
     } else {
         "Public chat · Enter send  Tab rooms  PgUp/PgDn scroll  F1 help  Ctrl-C quit".to_owned()
@@ -256,7 +290,7 @@ fn room_line(name: &str, active: bool) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Message, Update};
+    use crate::types::Update;
     use ratatui::{Terminal, backend::TestBackend};
 
     #[test]
@@ -357,5 +391,90 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing help: {command}");
         }
+    }
+
+    #[test]
+    fn failed_sends_remain_visible_while_a_new_draft_is_being_written() {
+        let mut app = App::new("alice".into(), Some("dr5rs".into()));
+        app.input = tui_input::Input::new("new draft".into());
+        for text in ["first lost message", "second lost message"] {
+            app.apply(Update::SendFailed {
+                room: Room::Internet("dr5rs".into()),
+                text: text.into(),
+                reason: "relay rejected".into(),
+            });
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let output = format!("{:?}", terminal.backend().buffer());
+        assert!(output.contains("first lost message"));
+        assert!(output.contains("second lost message"));
+        assert_eq!(app.input.value(), "new draft");
+    }
+
+    #[test]
+    fn failed_sends_survive_leaving_and_rejoining_their_room() {
+        let mut app = App::new("alice".into(), Some("dr5rs".into()));
+        app.input = tui_input::Input::new("new draft".into());
+        app.apply(Update::SendFailed {
+            room: Room::Internet("dr5rs".into()),
+            text: "room-specific unsent message".into(),
+            reason: "offline".into(),
+        });
+        app.join_channel("u4pru".into());
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(
+            !format!("{:?}", terminal.backend().buffer()).contains("room-specific unsent message")
+        );
+        app.join_channel("dr5rs".into());
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(
+            format!("{:?}", terminal.backend().buffer()).contains("room-specific unsent message")
+        );
+    }
+
+    #[test]
+    fn failed_sends_do_not_hide_later_received_messages() {
+        let mut app = App::new("alice".into(), Some("dr5rs".into()));
+        for i in 0..40 {
+            app.apply(Update::SendFailed {
+                room: app.room.clone(),
+                text: format!("unsent {i}"),
+                reason: "offline".into(),
+            });
+        }
+        app.apply(Update::Message(Message {
+            id: "newest".into(),
+            room: app.room.clone(),
+            author: "peer".into(),
+            nickname: "bob".into(),
+            text: "latest received message".into(),
+            timestamp_ms: u64::MAX,
+            mine: false,
+        }));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(format!("{:?}", terminal.backend().buffer()).contains("latest received message"));
+    }
+
+    #[test]
+    fn clearing_history_removes_failed_send_notice() {
+        let mut app = App::new("alice".into(), Some("dr5rs".into()));
+        app.apply(Update::SendFailed {
+            room: app.room.clone(),
+            text: "cleared failed message".into(),
+            reason: "rejected".into(),
+        });
+        app.input = tui_input::Input::new("/clear".into());
+        app.handle_event(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(!format!("{:?}", terminal.backend().buffer()).contains("cleared failed message"));
     }
 }
