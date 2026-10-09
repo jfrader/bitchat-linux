@@ -1,9 +1,3 @@
-mod app;
-mod config;
-mod internet;
-mod types;
-mod ui;
-
 use std::io::IsTerminal;
 use std::time::Duration;
 
@@ -14,10 +8,11 @@ use futures::StreamExt;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{broadcast, mpsc};
 
-use app::App;
-use config::Config;
-use internet::{Command, InternetConfig};
-use types::{Action, CHANNEL_CAPACITY, Notice, Room, Update, send_failure_notice};
+use bitchat_linux::app::App;
+use bitchat_linux::config::Config;
+use bitchat_linux::internet::{self, Command, InternetConfig};
+use bitchat_linux::types::{Action, CHANNEL_CAPACITY, Notice, Room, Update, send_failure_notice};
+use bitchat_linux::ui;
 
 const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(3);
