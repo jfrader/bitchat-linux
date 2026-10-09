@@ -83,7 +83,11 @@ impl App {
                 .radio
                 .detail
                 .unwrap_or_else(|| "Radio error".into()),
-            bitchatd::RadioState::Running => format!("{} links", snapshot.radio.links),
+            bitchatd::RadioState::Running => match snapshot.radio.links {
+                0 => "searching".into(),
+                1 => "1 link".into(),
+                links => format!("{links} links"),
+            },
         };
         self.last_mesh_state = Some(snapshot.radio.state);
         self.mesh_messages.clear();
@@ -297,6 +301,19 @@ impl App {
                 nickname: self.nickname.clone(),
             });
         }
+        if let Some(alias) = text.strip_prefix('#') {
+            let alias = alias.trim().to_ascii_lowercase();
+            if alias == "mesh" {
+                self.input.reset();
+                self.switch_room(Room::Mesh);
+                return None;
+            }
+            if self.geohash.as_deref() == Some(alias.as_str()) {
+                self.input.reset();
+                self.switch_room(Room::Internet(alias));
+                return None;
+            }
+        }
         if !text.starts_with('/') {
             self.input.reset();
             return Some(Action::Send {
@@ -405,6 +422,36 @@ mod tests {
         }
     }
 
+    fn snapshot_with(ids: &[&str]) -> bitchatd::Snapshot {
+        bitchatd::Snapshot {
+            me: bitchatd::Me {
+                peer_id: "id".into(),
+                nickname: "me".into(),
+                fingerprint: "fp".into(),
+            },
+            peers: Vec::new(),
+            messages: ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| bitchatd::ChatMessage {
+                    id: (*id).into(),
+                    sender_id: "sender".into(),
+                    nickname: "bob".into(),
+                    text: format!("text {id}"),
+                    timestamp: index as u64,
+                    mine: false,
+                })
+                .collect(),
+            settings: bitchatd::Settings::default(),
+            radio: bitchatd::RadioStatus {
+                state: bitchatd::RadioState::Running,
+                links: 0,
+                ..Default::default()
+            },
+            version: "test",
+        }
+    }
+
     #[test]
     fn commands_and_dm_safety() {
         let mut app = App::new("me".into(), None);
@@ -494,25 +541,21 @@ mod tests {
     fn snapshot_uses_persisted_identity_and_short_radio_status() {
         let mut app = App::new("anon".into(), None);
         assert_eq!(app.internet_status, "not joined");
-        let radio = bitchatd::RadioStatus {
-            state: bitchatd::RadioState::Running,
-            links: 0,
-            ..Default::default()
-        };
-        app.apply_mesh(bitchatd::Snapshot {
-            me: bitchatd::Me {
-                peer_id: "id".into(),
-                nickname: "persisted".into(),
-                fingerprint: "fp".into(),
+        app.apply_mesh(snapshot_with(&[]));
+        assert_eq!(app.nickname, "me");
+        assert_eq!(app.mesh_status, "searching");
+        let with_links = |links| bitchatd::Snapshot {
+            radio: bitchatd::RadioStatus {
+                state: bitchatd::RadioState::Running,
+                links,
+                ..Default::default()
             },
-            peers: Vec::new(),
-            messages: Vec::new(),
-            settings: bitchatd::Settings::default(),
-            radio,
-            version: "test",
-        });
-        assert_eq!(app.nickname, "persisted");
-        assert_eq!(app.mesh_status, "0 links");
+            ..snapshot_with(&[])
+        };
+        app.apply_mesh(with_links(1));
+        assert_eq!(app.mesh_status, "1 link");
+        app.apply_mesh(with_links(4));
+        assert_eq!(app.mesh_status, "4 links");
     }
 
     #[test]
@@ -789,5 +832,22 @@ mod tests {
         app.apply(Update::Notice("Bluetooth unavailable".into()));
         submit(&mut app, "/clear");
         assert_eq!(app.notice_text(), Some("Bluetooth unavailable"));
+    }
+
+    #[test]
+    fn typing_a_displayed_room_name_switches_instead_of_sending() {
+        let mut app = App::new("me".into(), Some("dr5rs".into()));
+        assert_eq!(submit(&mut app, "#mesh"), None);
+        assert_eq!(app.room, Room::Mesh);
+        assert_eq!(submit(&mut app, "#DR5RS"), None);
+        assert_eq!(app.room, Room::Internet("dr5rs".into()));
+        assert_eq!(
+            submit(&mut app, "#somewhere else"),
+            Some(Action::Send {
+                room: Room::Internet("dr5rs".into()),
+                text: "#somewhere else".into(),
+                nickname: "me".into()
+            })
+        );
     }
 }

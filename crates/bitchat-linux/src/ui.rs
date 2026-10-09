@@ -13,6 +13,11 @@ use crate::{
 };
 
 const ID_SUFFIX_LENGTH: usize = 6;
+const DIM: Color = Color::DarkGray;
+/// Width of the right-aligned nickname column in the log.
+const NICK_WIDTH: usize = 9;
+/// Text column start: `HH:MM ` (6) + nickname (NICK_WIDTH + 1) + `│ ` (2).
+const TEXT_COLUMN: usize = 18;
 
 const HELP: &[&str] = &[
     "Public chat (unencrypted)",
@@ -23,6 +28,7 @@ const HELP: &[&str] = &[
     "/join <geohash>    Join a location channel",
     "/mesh              Open Bluetooth mesh chat",
     "/internet          Open joined location channel",
+    "#mesh, #<geohash>  Same as /mesh and /internet",
     "/nick <name>       Change display name",
     "/radio auto|balanced|saver|off",
     "/clear             Clear current room history",
@@ -81,62 +87,91 @@ fn conversation<'a>(
         .scroll(((start - removed_rows).min(u16::MAX as usize) as u16, 0))
 }
 
-fn message_lines(message: &Message) -> Vec<Line<'static>> {
+fn nick_span(message: &Message, width: usize) -> Span<'static> {
     let name =
         bitchatd::sanitize_nickname(&message.nickname).unwrap_or_else(|| label(&message.nickname));
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            timestamp(message.timestamp_ms),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            format!(" {name} · {}", short_id(&message.author)),
-            Style::default()
-                .fg(if message.mine {
-                    Color::Cyan
-                } else {
-                    Color::Yellow
-                })
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
-    lines.extend(
-        bitchatd::clean_message(&message.text)
-            .split('\n')
-            .map(|line| Line::from(format!("  {line}"))),
-    );
-    lines
+    let trimmed: String = name.chars().take(width).collect();
+    Span::styled(
+        format!("{trimmed:>width$} "),
+        Style::default()
+            .fg(if message.mine {
+                Color::Cyan
+            } else {
+                Color::Yellow
+            })
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
-fn failed_send_lines(send: &FailedSend) -> Vec<Line<'static>> {
-    let mut lines = vec![Line::styled(
+fn failed_header(send: &FailedSend) -> Line<'static> {
+    Line::styled(
         format!(
             "{} Not sent · {}",
             timestamp(send.timestamp_ms),
             label(&send.reason)
         ),
         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-    )];
-    lines.extend(
-        bitchatd::clean_message(&send.text)
-            .split('\n')
-            .map(|line| Line::from(format!("  {line}"))),
-    );
-    lines
+    )
+}
+
+fn indented_lines(text: &str) -> Vec<Line<'static>> {
+    bitchatd::clean_message(text)
+        .split('\n')
+        .map(|line| Line::from(format!("{}{line}", " ".repeat(TEXT_COLUMN))))
+        .collect()
+}
+
+enum Entry<'a> {
+    Message(&'a Message),
+    Failed(&'a FailedSend),
 }
 
 fn chat_lines(app: &App) -> Vec<Line<'static>> {
-    let mut entries: Vec<_> = app
+    let mut entries: Vec<(u64, Entry<'_>)> = app
         .messages()
         .iter()
-        .map(|message| (message.timestamp_ms, message_lines(message)))
+        .map(|message| (message.timestamp_ms, Entry::Message(message)))
         .chain(
             app.failed_sends()
-                .map(|send| (send.timestamp_ms, failed_send_lines(send))),
+                .map(|send| (send.timestamp_ms, Entry::Failed(send))),
         )
         .collect();
-    entries.sort_by_key(|(timestamp, _)| *timestamp);
-    entries.into_iter().flat_map(|(_, lines)| lines).collect()
+    entries.sort_by_key(|(timestamp_ms, _)| *timestamp_ms);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (_, entry) in entries {
+        match entry {
+            Entry::Message(message) => {
+                let mut parts: Vec<String> = bitchatd::clean_message(&message.text)
+                    .split('\n')
+                    .map(str::to_owned)
+                    .collect();
+                if parts.is_empty() {
+                    parts.push(String::new());
+                }
+                let first = parts.remove(0);
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("{} ", timestamp(message.timestamp_ms)),
+                        Style::default().fg(DIM),
+                    ),
+                    nick_span(message, NICK_WIDTH),
+                    Span::styled("│ ", Style::default().fg(DIM)),
+                    Span::raw(first),
+                ]));
+                lines.extend(
+                    parts
+                        .into_iter()
+                        .map(|part| Line::from(format!("{}{part}", " ".repeat(TEXT_COLUMN)))),
+                );
+            }
+            Entry::Failed(send) => {
+                lines.push(failed_header(send));
+                lines.extend(indented_lines(&send.text));
+            }
+        }
+    }
+    lines
 }
 
 pub fn render(frame: &mut Frame, app: &App) {
@@ -149,24 +184,34 @@ pub fn render(frame: &mut Frame, app: &App) {
         .constraints([
             Constraint::Length(4),
             Constraint::Min(0),
-            Constraint::Length(3),
             Constraint::Length(2),
+            Constraint::Length(1),
         ])
         .split(area);
 
     let header = Text::from(vec![
         Line::from(vec![
             Span::styled(APP_NAME, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "  ·  {}  ·  public (unencrypted)",
-                label(&app.nickname)
-            )),
+            Span::styled(
+                format!("  ·  {}  ·  public (unencrypted)", label(&app.nickname)),
+                Style::default().fg(DIM),
+            ),
         ]),
-        Line::from(format!("Mesh: {}", label(&app.mesh_status))),
-        Line::from(format!("Internet: {}", label(&app.internet_status))),
+        Line::from(vec![
+            Span::styled("Mesh: ", Style::default().fg(DIM)),
+            Span::raw(label(&app.mesh_status)),
+        ]),
+        Line::from(vec![
+            Span::styled("Internet: ", Style::default().fg(DIM)),
+            Span::raw(label(&app.internet_status)),
+        ]),
     ]);
     frame.render_widget(
-        Paragraph::new(header).block(Block::default().borders(Borders::BOTTOM)),
+        Paragraph::new(header).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(DIM)),
+        ),
         sections[0],
     );
 
@@ -177,7 +222,7 @@ pub fn render(frame: &mut Frame, app: &App) {
         .split(sections[1]);
     if sidebar_width > 0 {
         let mut lines = vec![
-            Line::from("Rooms"),
+            Line::from(Span::styled("Rooms", Style::default().fg(DIM))),
             room_line("#mesh", app.room == Room::Mesh),
         ];
         if let Some(hash) = &app.geohash {
@@ -186,22 +231,34 @@ pub fn render(frame: &mut Frame, app: &App) {
                 app.room == Room::Internet(hash.clone()),
             ));
         } else {
-            lines.push(room_line("/join <geohash>", false));
-        }
-        lines.push(Line::from(""));
-        lines.push(Line::from("Nearby"));
-        if app.peers.is_empty() {
-            lines.push(Line::from("No peers"));
-        }
-        for peer in &app.peers {
-            lines.push(Line::from(format!(
-                "{} · {}",
-                label(&peer.nickname),
-                short_id(&peer.id)
+            lines.push(Line::from(Span::styled(
+                "  /join <geohash>",
+                Style::default().fg(DIM),
             )));
         }
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Nearby", Style::default().fg(DIM))));
+        if app.peers.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "No peers",
+                Style::default().fg(DIM),
+            )));
+        }
+        for peer in &app.peers {
+            lines.push(Line::from(vec![
+                Span::raw(label(&peer.nickname)),
+                Span::styled(
+                    format!(" · {}", short_id(&peer.id)),
+                    Style::default().fg(DIM),
+                ),
+            ]));
+        }
         frame.render_widget(
-            Paragraph::new(lines).block(Block::default().borders(Borders::RIGHT)),
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::RIGHT)
+                    .border_style(Style::default().fg(DIM)),
+            ),
             columns[0],
         );
     }
@@ -219,37 +276,61 @@ pub fn render(frame: &mut Frame, app: &App) {
         );
     }
 
-    let composer = Paragraph::new(label(app.input.value()))
-        .scroll((
-            0,
-            app.input
-                .visual_scroll(sections[2].width.saturating_sub(4) as usize)
-                .min(u16::MAX as usize) as u16,
-        ))
-        .block(
-            Block::default()
-                .title(format!("{} · message / command", label(&app.room.label())))
-                .borders(Borders::ALL),
+    let composer_area = sections[2];
+    if composer_area.width > 0 && composer_area.height > 0 {
+        let rows =
+            Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(composer_area);
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                "─".repeat(composer_area.width as usize),
+                Style::default().fg(DIM),
+            )),
+            rows[0],
         );
-    frame.render_widget(composer, sections[2]);
-    if sections[2].width > 2 && sections[2].height > 2 {
-        let cursor = app.input.visual_cursor().saturating_sub(
-            app.input
-                .visual_scroll(sections[2].width.saturating_sub(4) as usize),
-        );
-        frame.set_cursor_position((
-            sections[2]
-                .x
-                .saturating_add(1)
-                .saturating_add(cursor.min(sections[2].width.saturating_sub(2) as usize) as u16),
-            sections[2].y.saturating_add(1),
-        ));
+        let room = label(&app.room.label());
+        let prefix_width = room.chars().count() + 3;
+        let input_area = rows[1];
+        if (input_area.width as usize) > prefix_width {
+            let columns =
+                Layout::horizontal([Constraint::Length(prefix_width as u16), Constraint::Min(0)])
+                    .split(input_area);
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(room, Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(" › ", Style::default().fg(DIM)),
+                ])),
+                columns[0],
+            );
+            let scroll = app.input.visual_scroll(columns[1].width as usize);
+            frame.render_widget(
+                Paragraph::new(label(app.input.value()))
+                    .scroll((0, scroll.min(u16::MAX as usize) as u16)),
+                columns[1],
+            );
+            if columns[1].width > 0 {
+                let cursor = app
+                    .input
+                    .visual_cursor()
+                    .saturating_sub(scroll)
+                    .min(columns[1].width.saturating_sub(1) as usize);
+                frame.set_cursor_position((columns[1].x + cursor as u16, columns[1].y));
+            }
+        }
     }
 
     let footer = if let Some(notice) = app.notice_text() {
-        format!("{}  ·  F1 help  Tab rooms  Ctrl-C quit", label(notice))
+        Line::from(vec![
+            Span::styled(label(notice), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "  ·  F1 help  Tab rooms  Ctrl-C quit",
+                Style::default().fg(DIM),
+            ),
+        ])
     } else {
-        "Public chat · Enter send  Tab rooms  PgUp/PgDn scroll  F1 help  Ctrl-C quit".to_owned()
+        Line::from(Span::styled(
+            "Public chat · Enter send  Tab rooms  PgUp/PgDn scroll  F1 help  Ctrl-C quit",
+            Style::default().fg(DIM),
+        ))
     };
     frame.render_widget(
         Paragraph::new(footer).wrap(Wrap { trim: false }),
@@ -279,11 +360,11 @@ pub fn render(frame: &mut Frame, app: &App) {
 fn room_line(name: &str, active: bool) -> Line<'static> {
     Line::from(Span::styled(
         format!("{}{}", if active { "> " } else { "  " }, label(name)),
-        Style::default().add_modifier(if active {
-            Modifier::BOLD
+        if active {
+            Style::default().add_modifier(Modifier::BOLD)
         } else {
-            Modifier::empty()
-        }),
+            Style::default().fg(DIM)
+        },
     ))
 }
 
@@ -363,7 +444,7 @@ mod tests {
                 mine: false,
             }));
         }
-        let mut terminal = Terminal::new(TestBackend::new(25, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         assert!(format!("{:?}", terminal.backend().buffer()).contains("last 499"));
     }
@@ -391,6 +472,27 @@ mod tests {
         ] {
             assert!(help.contains(command), "missing help: {command}");
         }
+    }
+
+    #[test]
+    fn every_message_keeps_its_own_line() {
+        let mut app = App::new("alice".into(), None);
+        for i in 0..3u64 {
+            app.apply(Update::Message(Message {
+                id: i.to_string(),
+                room: Room::Mesh,
+                author: "sender".into(),
+                nickname: "bob".into(),
+                text: format!("line {i}"),
+                timestamp_ms: 1_750_000_000_000 + i * 1_000,
+                mine: false,
+            }));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let output = format!("{:?}", terminal.backend().buffer());
+        assert_eq!(output.matches("bob").count(), 3);
+        assert!(output.contains("line 2"));
     }
 
     #[test]
