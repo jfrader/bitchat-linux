@@ -43,7 +43,7 @@ Startup options: `--geohash <geohash>`, repeatable `--relay <url>`, and `--no-bl
 | F1 or `/help` | Show commands |
 | Esc | Close help or clear the draft |
 | Ctrl-C / `/quit` | Quit and stop both transports |
-| `/mesh`, `/internet` | Select a room |
+| `/mesh`, `/internet`, `#mesh`, `#<geohash>` | Select a room |
 | `/nick <name>` | Set nickname |
 | `/radio auto\|balanced\|saver\|off` | Set Bluetooth radio mode |
 | `/clear` | Clear the selected room's local history |
